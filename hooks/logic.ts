@@ -215,16 +215,55 @@ const LISTINGS = /^(ls|find|fd|fdfind|rg|grep|tree|du|stat|file|git\s+(status|di
 
 export type CommandKind = 'maker' | 'listing' | 'other'
 
-// The first command of the line decides, after env assignments and a leading cd ... &&
-export function commandKind(command: string): CommandKind {
-  const first = command
-    .split(/&&|\|\||;|\|/)
-    .map(part => part.trim().replace(/^(\w+=\S*\s+)+/, ''))
-    .find(part => part && !/^cd\s/.test(part)) ?? ''
-  if (MAKERS.test(first)) {
-    return 'maker'
+type Walk = { kind: CommandKind; maker?: { segment: string; dir: string; vars: Record<string, string> } }
+
+const ASSIGNMENT = /^(\w+)=("[^"]*"|'[^']*'|\S*)$/
+
+function unquote(text: string) {
+  return text.replace(/^["']|["']$/g, '')
+}
+
+// $NAME and ${NAME} from earlier assignments in the same command, and $HOME; undefined if any stays unknown
+function expand(text: string, vars: Record<string, string>, home: string): string | undefined {
+  const out = text.replace(/\$\{?(\w+)\}?/g, (whole, name: string) => (name === 'HOME' ? home : (vars[name] ?? whole)))
+  return out.includes('$') ? undefined : out
+}
+
+// Follows a command's segments as a shell would for what matters here: assignments, cd, and the last image command
+function walk(command: string, base: string, home: string): Walk {
+  const vars: Record<string, string> = {}
+  let dir = base
+  let first: string | undefined
+  let maker: Walk['maker']
+  for (const raw of command.split(/&&|\|\||;|\|/)) {
+    const assignment = ASSIGNMENT.exec(raw.trim())
+    if (assignment) {
+      const value = expand(unquote(assignment[2]!), vars, home)
+      if (value !== undefined) {
+        vars[assignment[1]!] = value
+      }
+      continue
+    }
+    const segment = raw.trim().replace(/^(\w+=\S*\s+)+/, '')
+    const cd = /^cd\s+(\S+)/.exec(segment)?.[1]
+    if (cd) {
+      const to = expand(unquote(cd), vars, home)
+      dir = to === undefined ? dir : absolute(to, dir, home)
+      continue
+    }
+    if (!segment) {
+      continue
+    }
+    first ??= segment
+    if (MAKERS.test(segment)) {
+      maker = { segment, dir, vars: { ...vars } }
+    }
   }
-  return LISTINGS.test(first) ? 'listing' : 'other'
+  return { kind: maker ? 'maker' : first && LISTINGS.test(first) ? 'listing' : 'other', ...(maker ? { maker } : {}) }
+}
+
+export function commandKind(command: string): CommandKind {
+  return walk(command, '/', '/').kind
 }
 
 const PATH_IN_TEXT = /(?:^|[\s"'=(:])(\/[^\s"'()<>]+?\.(?:png|jpe?g))(?=$|[\s"'),;<>])/gi
@@ -257,12 +296,6 @@ function jsonPaths(text: string): string[] {
   return (full.length > 0 ? full : hits).map(hit => hit.path)
 }
 
-// The directory a command runs in after a leading `cd DIR &&`
-function workingDir(command: string, base: string, home: string) {
-  const cd = /^\s*cd\s+("[^"]+"|'[^']+'|\S+)\s*&&/.exec(command)?.[1]?.replace(/^["']|["']$/g, '')
-  return cd ? absolute(cd, base, home) : base
-}
-
 function absolute(token: string, base: string, home: string) {
   if (token.startsWith('/')) {
     return token
@@ -276,18 +309,18 @@ function absolute(token: string, base: string, home: string) {
 // Image paths a tool call made: printed in its output, or, for an image-making command, the image it wrote,
 // which is its last image argument (`sips in.png --out out.png`, `magick in.jpg out.png`)
 export function imagePathsIn(output: string, command?: string, base = '/', home = '/'): string[] {
-  const kind = command === undefined ? 'other' : commandKind(command)
+  const walked = command === undefined ? { kind: 'other' as const } : walk(command, base, home)
   const fromJson = jsonPaths(output.trim())
-  const printed = kind === 'listing' ? [] : fromJson.length > 0 ? fromJson : [...output.matchAll(PATH_IN_TEXT)].map(m => m[1]!)
-  const made =
-    kind === 'maker'
-      ? (command ?? '')
-          .split(/\s+/)
-          .map(token => token.replace(/^["']|["']$/g, ''))
-          .filter(token => IMAGE_FILE.test(token) && !token.includes('$'))
-          .slice(-1)
-          .map(token => absolute(token, workingDir(command ?? '', base, home), home))
-      : []
+  const printed = walked.kind === 'listing' ? [] : fromJson.length > 0 ? fromJson : [...output.matchAll(PATH_IN_TEXT)].map(m => m[1]!)
+  const maker = 'maker' in walked ? walked.maker : undefined
+  const made = maker
+    ? maker.segment
+        .split(/\s+/)
+        .map(token => expand(unquote(token), maker.vars, home))
+        .filter((token): token is string => token !== undefined && IMAGE_FILE.test(token))
+        .slice(-1)
+        .map(token => absolute(token, maker.dir, home))
+    : []
   return [...new Set([...printed, ...made])].slice(0, MAX_TOOL_CARDS)
 }
 

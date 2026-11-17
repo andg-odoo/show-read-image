@@ -219,6 +219,12 @@ test('image paths come from what a command printed or, for an image maker, what 
   expect(imagePathsIn('', 'magick in.jpg out.png', '/work', '/home/me')).toEqual(['/work/out.png'])
   expect(imagePathsIn('', 'cd ~/shots && screencapture -x now.png', '/work', '/home/me')).toEqual(['/home/me/shots/now.png'])
   expect(imagePathsIn('', 'screencapture -x $OUT/now.png', '/work', '/home/me')).toEqual([])
+  // Assignments and a cd anywhere before the image command, as a test script writes them
+  expect(imagePathsIn('', "D=/tmp/x; mkdir -p $D && cd $D && convert -size 9x9 xc:red -draw 'circle 4,4 4,1' shot.png", '/work', '/home/me')).toEqual([
+    '/tmp/x/shot.png',
+  ])
+  expect(imagePathsIn('', 'OUT="$HOME/shots"; screencapture -x "${OUT}/now.png"', '/work', '/home/me')).toEqual(['/home/me/shots/now.png'])
+  expect(commandKind('D=/tmp/x; mkdir -p $D && convert a.jpg $D/b.png')).toBe('maker')
   expect(imagePathsIn(JSON.stringify({ screenshotPath: '/t/full.png', thumbnailPath: '/t/thumb.png' }))).toEqual(['/t/full.png'])
   expect(imagePathsIn('/a/1.png /a/2.png /a/3.png /a/4.png /a/5.png', 'make shots')).toHaveLength(4)
 
