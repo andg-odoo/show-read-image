@@ -245,3 +245,55 @@ test('a screenshot a Bash command wrote draws under its row, marked as not read'
   expect((await ui.find({ type: 'Text', text: /not read by the agent/ }))?.text).toContain('8×4')
   await ui.unmount()
 })
+
+test('show_images draws a titled, unread card and can step back a version', async ($, on) => {
+  const written = new Map<string, string>()
+  const disk = new Map([['/s/a.png', RED], ['/s/b.png', GREEN]])
+  let edits = 1
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('fs.stat', (_, e) => {
+    if (!disk.has(e.path)) {
+      throw new Error('ENOENT')
+    }
+    return { value: { kind: 'file' as const, size: 90, mtimeMs: edits, isLink: false } }
+  })
+  on('fs.read', (_, e) => (disk.has(e.path) ? { value: { base64: disk.get(e.path)! } } : { value: written.get(e.path) ?? '' }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const mount = (id: string) =>
+    $.ui.mount({
+      plugin: 'show-read-image',
+      surface: 'terminal',
+      component: 'ToolUse',
+      requestId: id,
+      viewport: { columns: 120, rows: 40 },
+      props: { tool_use_id: id, tool: 'mcp__show-read-image__show_images', input: {}, isRunning: false, isErrored: false, isInterrupted: false, output: '' },
+    })
+
+  const tool = 'mcp__show-read-image__show_images'
+  const first = await $.tool.call({ tool, tool_use_id: 'show-1', title: 'Before and after', images: [{ path: '/s/a.png', label: 'Before' }, { path: '/s/b.png', label: 'After' }] })
+  expect(String(first.result)).toContain('Shown 2 image(s)')
+  const card = await mount('show-1')
+  expect(await card.find({ type: 'Text', text: 'Before and after' })).toBeDefined()
+  expect((await card.find({ type: 'Text', text: /not read by the agent/ }))?.text).toContain('2 images')
+  expect(await card.findAll({ type: 'Image' })).toHaveLength(2)
+  await card.unmount()
+
+  disk.set('/s/a.png', BLUE)
+  edits += 1
+  await $.tool.call({ tool, tool_use_id: 'show-2', images: [{ path: '/s/a.png', version: -1, label: 'previous' }] })
+  const back = await mount('show-2')
+  expect((await back.find({ type: 'Text', text: /v1\/2/ }))?.text).toContain('not read by the agent')
+
+  const missing = await $.tool.call({ tool, tool_use_id: 'show-3', images: [{ path: '/s/none.png' }] })
+  expect(String(missing.result)).toContain('Could not show: /s/none.png')
+  await back.unmount()
+})

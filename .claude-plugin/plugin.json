@@ -1,7 +1,7 @@
 {
   "name": "show-read-image",
-  "version": "0.3.0",
-  "description": "Draw PNGs the Read tool opens inline: framed, side by side per group, before/after pairs and versions",
+  "version": "0.4.0",
+  "description": "Draw images inline under the tool calls that made them: reads, screenshots, MCP images and show_images, with before/after pairs and versions",
   "types": "./types/index.d.ts",
   "author": {
     "name": "andg-odoo",

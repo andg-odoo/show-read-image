@@ -1,7 +1,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register, ToolGroupCall } from 'claude-code'
 
-import type { ShowReadImageCardShot, ShowReadImageHistory, ShowReadImageMode, ShowReadImageView } from '../types'
+import type { ShowReadImageCard, ShowReadImageCardShot, ShowReadImageHistory, ShowReadImageMode, ShowReadImageView } from '../types'
 import {
   COMPACT,
   DEFAULT_CELL,
@@ -42,7 +42,7 @@ const history = atom({ plugin: 'show-read-image', key: 'history' } as const, {},
 const step = atom({ plugin: 'show-read-image', key: 'step' } as const, -1)
 const mode = atom({ plugin: 'show-read-image', key: 'mode' } as const, 'both' as ShowReadImageMode)
 const view = atom({ plugin: 'show-read-image', key: 'view' } as const, 'now' as ShowReadImageView)
-const cards = atom({ plugin: 'show-read-image', key: 'cards' } as const, {} as Record<string, ShowReadImageCardShot[]>, { shape: 'cards-1' })
+const cards = atom({ plugin: 'show-read-image', key: 'cards' } as const, {} as Record<string, ShowReadImageCard>, { shape: 'cards-1' })
 
 const MIN_FRAME = 30
 const MAX_SIDE = 6
@@ -449,14 +449,42 @@ async function collect($: EngineInterface, id: string, tool: string, input: Reco
       }
     }
   }
-  if (shots.length === 0) {
-    return
+  if (shots.length > 0) {
+    await keepCard($, id, { shots })
   }
+}
+
+async function keepCard($: EngineInterface, id: string, card: ShowReadImageCard) {
   await update($, cards, all => {
     const ids = Object.keys(all)
     const kept = ids.length >= MAX_CARDS_KEPT ? Object.fromEntries(ids.slice(-MAX_CARDS_KEPT / 2).map(k => [k, all[k]!])) : all
-    return { ...kept, [id]: shots }
+    return { ...kept, [id]: card }
   })
+}
+
+type ShowInput = { images: { path: string; label?: string; version?: number }[]; title?: string }
+
+// The show_images tool: each path as it is now, or `version` steps back through what was kept of it
+async function show($: EngineInterface, id: string, input: ShowInput): Promise<string> {
+  const shots: ShowReadImageCardShot[] = []
+  const missing: string[] = []
+  for (const image of input.images.slice(0, MAX_SIDE)) {
+    const base64 = await pngOfFile($, image.path)
+    if (!base64) {
+      missing.push(image.path)
+      continue
+    }
+    await record($, image.path, base64)
+    const versions = (await kept($))[image.path]?.versions ?? []
+    const now = versions.findIndex(one => one.hash === hashOf(base64))
+    const at = Math.max(0, now + Math.min(0, Math.trunc(image.version ?? 0)))
+    shots.push({ key: image.path, label: image.label ?? splitPath(image.path).stem, hash: versions[at]?.hash ?? hashOf(base64), isUnread: true })
+  }
+  if (shots.length > 0) {
+    await keepCard($, id, input.title === undefined ? { shots } : { title: input.title, shots })
+  }
+  const shown = `Shown ${shots.length} image(s) to the user, marked as not read by you.`
+  return missing.length > 0 ? `${shown} Could not show: ${missing.join(', ')}` : shown
 }
 
 async function bytesOf($: EngineInterface, shot: ShowReadImageCardShot) {
@@ -465,9 +493,9 @@ async function bytesOf($: EngineInterface, shot: ShowReadImageCardShot) {
 }
 
 // One picture draws as a read does, with its versions; several share a frame
-async function drawCard($: EngineInterface, ui: Ui, id: string, shots: ShowReadImageCardShot[], columns: number | undefined) {
+async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadImageCard, columns: number | undefined) {
   const pictures: { shot: ShowReadImageCardShot; base64: string }[] = []
-  for (const shot of shots) {
+  for (const shot of card.shots) {
     const base64 = await bytesOf($, shot)
     if (base64) {
       pictures.push({ shot, base64 })
@@ -477,19 +505,21 @@ async function drawCard($: EngineInterface, ui: Ui, id: string, shots: ShowReadI
   if (!only) {
     return undefined
   }
-  if (pictures.length === 1) {
+  if (pictures.length === 1 && card.title === undefined) {
     return drawRead($, ui, id, only.shot.key, { base64: only.base64 }, columns, false, only.shot.isUnread)
   }
   const panes = Panes(ui, `${id}-card`, pictures.map(one => shot(one.shot.label, diskPic(one.base64))), wide(columns), 6, 2)
-  const meta = [pictures.some(one => one.shot.isUnread) ? UNREAD : '', `${pictures.length} images`].filter(Boolean).join(' · ')
-  return Frame(ui, { title: only.shot.label, meta, width: panes.width }, panes.tree)
+  const meta = [pictures.some(one => one.shot.isUnread) ? UNREAD : '', pictures.length > 1 ? `${pictures.length} images` : pixels(diskPic(only.base64).size)]
+    .filter(Boolean)
+    .join(' · ')
+  return Frame(ui, { title: card.title ?? only.shot.label, meta, width: panes.width }, panes.tree)
 }
 
 async function cardsIn($: EngineInterface, calls: ReadonlyArray<ToolGroupCall>) {
   const all = await read($, cards)
   return calls.flatMap(call => {
-    const shots = call.tool_use_id ? all[call.tool_use_id] : undefined
-    return call.tool_use_id && shots ? [[call.tool_use_id, shots] as const] : []
+    const card = call.tool_use_id ? all[call.tool_use_id] : undefined
+    return call.tool_use_id && card ? [[call.tool_use_id, card] as const] : []
   })
 }
 
@@ -506,8 +536,39 @@ export const register: Register = on => {
     if (stored && typeof stored === 'object') {
       await update($, history, all => (Object.keys(all).length > 0 ? all : (stored as Record<string, ShowReadImageHistory>)))
     }
+    await $.tool.register({
+      name: 'show_images',
+      description:
+        'Show image files to the user under this call, without loading them into your context. The card says the images were not read by you, ' +
+        'so Read an image instead when you need to see it yourself or make claims about it. One image draws on its own; several share one frame, ' +
+        'side by side, in the order given. Each item: path, optional label, optional version (0 = the file as it is now; -1 = the version kept ' +
+        'before it, -2 the one before that).',
+      isDeferred: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          title: { type: 'string' },
+          images: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 6,
+            items: {
+              type: 'object',
+              properties: { path: { type: 'string' }, label: { type: 'string' }, version: { type: 'integer', maximum: 0 } },
+              required: ['path'],
+            },
+          },
+        },
+        required: ['images'],
+      },
+    })
     return next(e)
   })
+
+  on('tool.call', { tool: 'mcp__show-read-image__show_images' }, async ($, e) => {
+    const input = e as unknown as ShowInput
+    return { result: await show($, e.tool_use_id, input) }
+  }).catch(() => ({ deny: 'show-read-image: could not show the images.' }))
 
   // Keeps each new content of a PNG path as a version so older ones can be drawn again
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
@@ -549,8 +610,8 @@ export const register: Register = on => {
       const ui = $.ui.resolve(e)
       const line = await next(e)
       const drawn = []
-      for (const [id, shots] of toolCards) {
-        drawn.push(await drawCard($, ui, id, shots, e.viewport?.columns))
+      for (const [id, card] of toolCards) {
+        drawn.push(await drawCard($, ui, id, card, e.viewport?.columns))
       }
       return (
         <ui.Box flexDirection="column">
@@ -585,8 +646,8 @@ export const register: Register = on => {
       const at = { title: `${shots.length} images`, hint: hints.length === 1 ? hints[0] : undefined, meta: `${rest.length} reads` }
       trees.push(Frame(ui, { ...at, width: panes.width }, panes.tree))
     }
-    for (const [id, shots] of toolCards) {
-      const tree = await drawCard($, ui, id, shots, columns)
+    for (const [id, card] of toolCards) {
+      const tree = await drawCard($, ui, id, card, columns)
       if (tree) {
         trees.push(tree)
       }
@@ -606,14 +667,14 @@ export const register: Register = on => {
     }
     if (!file) {
       const id = e.props.tool_use_id ?? e.requestId
-      const shots = (await read($, cards))[id]
-      if (!shots) {
+      const card = (await read($, cards))[id]
+      if (!card) {
         return next(e)
       }
       void measure($, e.viewport)
       const row = await next(e)
       const ui = $.ui.resolve(e)
-      const tree = await drawCard($, ui, id, shots, e.viewport?.columns)
+      const tree = await drawCard($, ui, id, card, e.viewport?.columns)
       return (
         <ui.Box flexDirection="column">
           {row}
