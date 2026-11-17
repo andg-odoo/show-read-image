@@ -22,11 +22,17 @@ A Claude Code mod that draws images inline in the transcript, under the tool cal
   player. The grid comes from AVFoundation on macOS (a Swift helper compiled on first use) or from ffmpeg and ffprobe
   elsewhere. There, frames aren't stamped with their time, so the eight sample times go in a dim row under the
   grid; clips over a minute are sampled by seeking to each frame rather than decoding the whole video.
-- **Live playback.** Expanding a video's filmstrip opens it with `play`: frames decode in real time at the pane's
+- **Videos play in their card.** `▶ Play` turns the frame grid into the clip, with a scrub bar under it
+  (`❚❚ Pause  0:04 ━━━━━●───── 0:14`, each stretch a jump) and `Frames` to go back. `show_images` can give a video
+  `chapters` ({ label, at }), listed beside it as links that play from there.
+- **Live playback in Expand.** Expanding a video's filmstrip opens it with `play`: frames decode in real time at the pane's
   size and swap into one picture, newest first (a slow terminal drops frames rather than falling behind), with the
   position, frames shown per second and frames dropped. `pause`, `restart`, and a resize decodes at the new size.
   Frames come from an Objective-C/AVFoundation helper on macOS (compiled with clang on first use), or from ffmpeg
   writing them to files in real time elsewhere.
+- **Actions.** Each card's footer has `⤢ Expand`, `↗ View` (the system viewer), `Save to Downloads` and `Copy path`, and
+  on the left the card's views (`Both  Before  After`, `All  vs B`, `◀ 2 of 3 ▶  One  All versions`), the one showing
+  in bold.
 - **Expand.** ⤢ on any picture opens it in a pane beside the chat, as large as the pane allows, with ◀ ▶ through
   its versions when it has any.
 - **One way to compare.** A card with several images has `[ side by side ] [ A only ] [ B only ]` for two, and

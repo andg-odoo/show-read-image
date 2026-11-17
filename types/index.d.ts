@@ -7,10 +7,13 @@ export type ShowReadImageMode = 'both' | 'after' | 'before'
 export type ShowReadImageView = 'now' | 'side'
 
 // `video`: the picture is this video's filmstrip, and the pane can play it
-export type ShowReadImageExpanded = { label: string; hash: string; key?: string; width?: number; height?: number; video?: string }
+export type ShowReadImageExpanded = { label: string; hash: string; key?: string; width?: number; height?: number; video?: string; duration?: number }
 
 // `width`/`height`: the source's own size, where the bytes kept are a scaled-down copy
 // `note`: what a video's filmstrip stands for (length, frames, longest gap); `isVideo`: `key` is the video itself
+// A labelled moment in a video, `at` seconds in, that the card lists beside the player
+export type ShowReadImageChapter = { label: string; at: number }
+
 export type ShowReadImageCardShot = {
   key: string
   label: string
@@ -21,6 +24,8 @@ export type ShowReadImageCardShot = {
   note?: string
   samples?: string
   isVideo?: boolean
+  duration?: number
+  chapters?: ShowReadImageChapter[]
 }
 
 // `isCommand`: made by a tool or command rather than shown on purpose; it is not drawn once a later Read shows it

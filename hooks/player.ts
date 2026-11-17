@@ -19,6 +19,8 @@ type Child = HookStream<ProcessSpawnChunk, ProcessSpawnResult>
 
 export type Playback = {
   video: string
+  // The render site the frames go to: the Expand pane, or the card the video plays in
+  site: string
   status: 'starting' | 'playing' | 'paused' | 'ended' | 'failed'
   error: string
   position: number
@@ -120,9 +122,9 @@ export type Source = { kind: 'helper'; argv: string[] } | { kind: 'files'; argv:
 export function play($: EngineInterface, paneId: string, video: string, from: number, box: { width: number; height: number }, source: Source) {
   stopChild($)
   const p: Playback =
-    playback?.video === video
+    playback?.video === video && playback.site === paneId
       ? { ...playback, status: 'starting', error: '', first: undefined, pending: undefined, isBlitting: false, box }
-      : { video, status: 'starting', error: '', position: from, first: undefined, last: undefined, pending: undefined, isBlitting: false, received: 0, shown: 0, dropped: 0, shownLastSecond: 0, box }
+      : { video, site: paneId, status: 'starting', error: '', position: from, first: undefined, last: undefined, pending: undefined, isBlitting: false, received: 0, shown: 0, dropped: 0, shownLastSecond: 0, box }
   playback = p
   ticker ??= $.clock.every(1000, () => {
     if (playback) {

@@ -356,12 +356,17 @@ export function longestGap(times: number[]): { gap: number; gapAt: number } {
   return { gap, gapAt }
 }
 
-function seconds(n: number) {
-  return `${n < 10 ? n.toFixed(2) : n.toFixed(1)} s`
+// A time in a clip as m:ss.s, or m:ss where `whole`
+export function clockOf(t: number, whole = false) {
+  const minutes = Math.floor(t / 60)
+  const rest = t - minutes * 60
+  return `${minutes}:${(whole ? Math.floor(rest).toString() : rest.toFixed(1)).padStart(whole ? 2 : 4, '0')}`
 }
 
+// The clip in words: its length and frames, and where it held still longest when that was over half a second
 export function videoNote(stats: VideoStats) {
-  return `${seconds(stats.duration)} · ${stats.frames} frames · longest gap ${seconds(stats.gap)} at ${seconds(stats.gapAt)}`
+  const hold = stats.gap >= 0.5 ? ` · longest hold ${stats.gap.toFixed(1)} s at ${clockOf(stats.gapAt)}` : ''
+  return `${clockOf(stats.duration)} · ${stats.frames} frames${hold}`
 }
 
 // Eight frames: four across for a tall video, two across for a wide one
@@ -387,4 +392,29 @@ export function parseFrameLine(line: string): { kind: 'frame'; t: number; png: s
 export function playerBox(columns: number, rows: number, cellWidth: number, cell: number, controlRows = 2) {
   const cellHeight = cellWidth * cell
   return { width: Math.max(64, Math.round(columns * cellWidth)), height: Math.max(64, Math.round((rows - controlRows) * cellHeight)) }
+}
+
+// The player's word for where the clip is
+export function playWord(state: 'playing' | 'paused' | 'ended' | 'idle', position: number) {
+  if (state === 'playing') {
+    return '❚❚ Pause'
+  }
+  if (state === 'ended') {
+    return '↺ Replay'
+  }
+  return state === 'paused' && position > 0 ? '▶ Resume' : '▶ Play'
+}
+
+// A scrub bar of `segments` cells in about `count` pressable stretches: played '━', the playhead '●', the rest '─'
+export function scrubChunks(segments: number, playhead: number, count = 20) {
+  const size = Math.max(1, Math.ceil(segments / count))
+  const chunks: { start: number; label: string; isAhead: boolean }[] = []
+  for (let start = 0; start < segments; start += size) {
+    let label = ''
+    for (let i = start; i < Math.min(segments, start + size); i++) {
+      label += i === playhead ? '●' : i < playhead ? '━' : '─'
+    }
+    chunks.push({ start, label, isAhead: start > playhead })
+  }
+  return chunks
 }
