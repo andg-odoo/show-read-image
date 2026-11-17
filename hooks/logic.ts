@@ -247,8 +247,8 @@ export function commandKind(command: string): CommandKind {
   return LISTINGS.test(first) ? 'listing' : 'other'
 }
 
-const PATH_IN_TEXT = /(?:^|[\s"'=(:])(\/[^\s"'()<>]+?\.(?:png|jpe?g|mov|mp4|m4v))(?=$|[\s"'),;<>])/gi
-const IMAGE_PATH = /^\/.+\.(png|jpe?g|mov|mp4|m4v)$/i
+const PATH_IN_TEXT = /(?:^|[\s"'=(:])(\/[^\s"'()<>]+?\.(?:png|jpe?g|mov|mp4|m4v|webm))(?=$|[\s"'),;<>])/gi
+const IMAGE_PATH = /^\/.+\.(png|jpe?g|mov|mp4|m4v|webm)$/i
 
 // A JSON result names paths whose keys say what they are; a thumbnail beside a full image is a duplicate
 function jsonPaths(text: string): string[] {
@@ -321,7 +321,12 @@ export function isPng(base64: string) {
 // Videos
 
 export function isVideoPath(path: string) {
-  return /\.(mov|mp4|m4v)$/i.test(path)
+  return /\.(mov|mp4|m4v|webm)$/i.test(path)
+}
+
+// WebM (VP8/VP9, what Playwright records) is beyond AVFoundation, so only ffmpeg decodes it
+export function needsFfmpeg(path: string) {
+  return /\.webm$/i.test(path)
 }
 
 // `samples`: when each of the grid's frames is from, where the frames themselves aren't stamped with it
@@ -329,6 +334,18 @@ export type VideoStats = { duration: number; frames: number; gap: number; gapAt:
 
 // Clips longer than this are sampled by seeking to each frame instead of decoding the whole video
 export const SEEK_ABOVE_SECONDS = 60
+
+// A clip's length: the container's, or for a recording that never wrote one (streaming recorders, often
+// Playwright's), its last frame's time plus one frame
+export function clipLength(containerSeconds: number, times: number[]) {
+  if (containerSeconds > 0) {
+    return containerSeconds
+  }
+  const sorted = [...times].sort((a, b) => a - b)
+  const last = sorted.at(-1) ?? 0
+  const step = sorted.length > 1 ? (last - sorted[0]!) / (sorted.length - 1) : 1 / 30
+  return last > 0 ? last + step : 0
+}
 
 // Where the grid's frames come from: the fps filter starts at 0; seeks take the middle of each eighth
 export function sampleTimes(duration: number, count: number, isSeeking: boolean) {

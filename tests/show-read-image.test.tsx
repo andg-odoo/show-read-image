@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { addVersion, cellFromTmux, cellOf, clockOf, commandKind, parseFrameLine, playWord, playerBox, scrubChunks, isVideoPath, longestGap, sampleTimes, samplesRow, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+import { addVersion, cellFromTmux, cellOf, clipLength, clockOf, commandKind, needsFfmpeg, parseFrameLine, playWord, playerBox, scrubChunks, isVideoPath, longestGap, sampleTimes, samplesRow, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
 
 // The test runtime has timers; the mod's lib leaves them out
 declare const setTimeout: (done: () => void, ms: number) => unknown
@@ -640,6 +640,14 @@ test('a Read whose PNG is over 2 MiB is converted from the file on disk', async 
 test('a video is summed up by its length, frame count and longest gap between frames', () => {
   expect(isVideoPath('/t/rec.MOV')).toBe(true)
   expect(isVideoPath('/t/shot.png')).toBe(false)
+  expect(isVideoPath('/t/test-results/video.webm')).toBe(true)
+  expect(needsFfmpeg('/t/video.webm')).toBe(true)
+  expect(needsFfmpeg('/t/rec.mov')).toBe(false)
+  // A streamed recording with no container length runs to its last frame plus one
+  expect(Math.round(clipLength(0, [0, 0.04, 0.08, 47.315]) * 1000)).toBe(Math.round((47.315 + 47.315 / 3) * 1000))
+  expect(clipLength(12.5, [0, 1])).toBe(12.5)
+  expect(clipLength(0, [])).toBe(0)
+  expect(imagePathsIn('video saved: /t/test-results/login/video.webm')).toEqual(['/t/test-results/login/video.webm'])
   expect(longestGap([0, 0.5, 2.1, 2.2])).toEqual({ gap: 1.6, gapAt: 2.1 })
   expect(longestGap([])).toEqual({ gap: 0, gapAt: 0 })
   expect(videoNote({ duration: 9.6, frames: 159, gap: 1.615, gapAt: 1.61 })).toBe('0:09.6 · 159 frames · longest hold 1.6 s at 0:01.6')
@@ -717,7 +725,7 @@ test('a video over a minute is sampled by seeking to each frame, not decoded who
       ? 'Linux\n'
       : line.includes('command -v') ? '/usr/bin/x\n'
       : line.includes('stream=width,height') ? '1920,1080\n'
-      : line.includes('packet=pts_time') ? '0\n1\n2\n'
+      : line.includes('packet=pts_time') ? '0\n300\n599.96\n'
       : line.includes('format=duration') ? '600\n'
       : ''
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -1021,6 +1029,8 @@ test('a video card plays in place, with a scrub bar and chapters that jump', asy
     throw new Error('ENOENT')
   })
   on('fs.read', (_, e) => (e.path.endsWith('-strip.png') ? { value: { base64: BLUE } } : { value: written.get(e.path) ?? '' }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('fs.list', () => ({ value: [] }))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>engine row</Text>
@@ -1051,5 +1061,156 @@ test('a video card plays in place, with a scrub bar and chapters that jump', asy
   await playing.unmount()
   const rest = await mount()
   expect(await rest.find({ type: 'Button', key: 'qa-play' })).toBeDefined()
+  // ⤢ carries the chapters to the Expand pane, where they sit under the bar and jump the same way
+  await rest.press({ key: 'qa-expand' })
   await rest.unmount()
+  const pane = await $.ui.mount({
+    plugin: 'show-read-image', surface: 'terminal', component: 'Pane', requestId: 'show-read-image', viewport: { columns: 160, rows: 50 },
+    props: { title: 'qa', isFocused: true, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  })
+  expect(await pane.find({ type: 'Text', text: '2. Invites become chips' })).toBeDefined()
+  await pane.press({ key: 'player-chapter-0-at' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  expect(spawned.at(-1)?.at(-1)).toBe('3.000')
+  await pane.unmount()
+})
+
+test('a WebM goes to ffmpeg even on a Mac, since AVFoundation can\'t decode it', async ($, on) => {
+  const written = new Map<string, string>()
+  const ran: string[][] = []
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    const line = e.argv.join(' ')
+    const stdout = line === 'uname -s'
+      ? 'Darwin\n'
+      : line.includes('command -v') ? '/usr/bin/x\n'
+      : line.includes('stream=width,height') ? '1280,720\n'
+      : line.includes('packet=pts_time') ? '0\n0.04\n'
+      : line.includes('format=duration') ? '3\n'
+      : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.exists', () => ({ value: true }))
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/video.webm' || e.path.endsWith('-strip.png')) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 7, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => (e.path.endsWith('-strip.png') ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
+  const result = await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'webm', images: [{ path: '/s/video.webm' }] })
+  expect(String(result.result)).toContain('Shown 1 image(s)')
+  expect(ran.some(argv => argv[0] === 'ffmpeg' && argv.includes('/s/video.webm'))).toBe(true)
+  expect(ran.some(argv => argv[0]!.endsWith('/filmstrip'))).toBe(false)
+})
+
+test('a WebM with no container length still gets a grid, its seeks kept before the last frame', async ($, on) => {
+  const written = new Map<string, string>()
+  const ran: string[][] = []
+  // 818 frames 1/30 s apart from 0 to 27.233 s, as a streaming recorder writes them, and no length
+  const packets = Array.from({ length: 818 }, (_, i) => (i / 30).toFixed(3)).join('\n') + '\n'
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    const line = e.argv.join(' ')
+    const stdout = line === 'uname -s'
+      ? 'Linux\n'
+      : line.includes('command -v') ? '/usr/bin/x\n'
+      : line.includes('stream=width,height') ? '2560,1359\n'
+      : line.includes('packet=pts_time') ? packets
+      : line.includes('format=duration') ? 'N/A\n'
+      : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.exists', () => ({ value: true }))
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/streamed.webm' || e.path.endsWith('-strip.png')) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 9, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => (e.path.endsWith('-strip.png') ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
+  const result = await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'streamed', images: [{ path: '/s/streamed.webm' }] })
+  expect(String(result.result)).toContain('Shown 1 image(s)')
+  // 27.27 s is under a minute, so the grid comes from the fps filter over that length
+  const grid = ran.find(argv => argv[0] === 'ffmpeg' && argv.join(' ').includes('tile='))
+  expect(grid?.join(' ')).toMatch(/fps=0\.29\d+/)
+})
+
+test('several videos share one player, picked from a list beside it', async ($, on) => {
+  const written = new Map<string, string>()
+  const spawned: string[][] = []
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  // Either video route may be cached by an earlier test, so both answer
+  on('process.run', (_, e) => {
+    const line = e.argv.join(' ')
+    const length = line.includes('/s/two.mp4') ? '5' : '10'
+    const stdout = line === 'uname -s'
+      ? 'Linux\n'
+      : line.includes('command -v') ? '/usr/bin/x\n'
+      : e.argv[0]!.endsWith('/filmstrip') ? `{"duration":${length},"frames":30,"gap":0.03,"gapAt":0.5}\n`
+      : line.includes('stream=width,height') ? '1280,720\n'
+      : line.includes('packet=pts_time') ? '0\n0.04\n'
+      : line.includes('format=duration') ? `${length}\n`
+      : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('process.spawn', async function* (_, e) {
+    spawned.push([...e.argv])
+    return { value: { code: 0, signal: null } }
+  })
+  on('fs.exists', () => ({ value: true }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/one.mp4' || e.path === '/s/two.mp4' || e.path.endsWith('-strip.png')) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 11, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => (e.path.endsWith('-strip.png') ? { value: { base64: e.path.includes(String(e.path.length)) ? RED : BLUE } } : { value: written.get(e.path) ?? '' }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'list', title: 'Bug reports', images: [{ path: '/s/one.mp4', label: 'one' }, { path: '/s/two.mp4', label: 'document_accounting_bug_with_a_very_long_name' }] })
+  const mount = () =>
+    $.ui.mount({
+      plugin: 'show-read-image', surface: 'terminal', component: 'ToolUse', requestId: 'list', viewport: { columns: 140, rows: 50 },
+      props: { tool_use_id: 'list', tool: 'mcp__show-read-image__show_images', input: {}, isRunning: false, isErrored: false, isInterrupted: false, output: '' },
+    })
+  const card = await mount()
+  // One picture, the selected clip, and the list with each length
+  expect(await card.findAll({ type: 'Image' })).toHaveLength(1)
+  expect(await card.find({ type: 'Text', text: 'Videos' })).toBeDefined()
+  expect(await card.find({ type: 'Text', text: '▸ one  0:10' })).toBeDefined()
+  // A long name is cut short so its length stays on the row
+  expect((await card.find({ type: 'Button', key: 'list-clip-1' }))?.props.label).toBe('  document_accounting_bug_with_a_…  0:05')
+  await card.press({ key: 'list-clip-1' })
+  await card.unmount()
+
+  const second = await mount()
+  expect(await second.find({ type: 'Text', text: '▸ document_accounting_bug_with_a_…  0:05' })).toBeDefined()
+  await second.press({ key: 'list-play' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  expect(spawned.at(-1)).toContain('/s/two.mp4')
+  await second.unmount()
 })

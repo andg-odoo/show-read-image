@@ -1,6 +1,6 @@
 import type { EngineInterface } from 'claude-code'
 
-import { SEEK_ABOVE_SECONDS, longestGap, sampleTimes, stripLayout } from './logic'
+import { SEEK_ABOVE_SECONDS, clipLength, longestGap, needsFfmpeg, sampleTimes, stripLayout } from './logic'
 import type { VideoStats } from './logic'
 import type { Source } from './player'
 
@@ -64,6 +64,13 @@ async function has($: EngineInterface, name: string) {
   return ran?.exitCode === 0 && ran.stdout.trim() !== ''
 }
 
+let ffmpegFound: Promise<boolean> | undefined
+
+export function hasFfmpeg($: EngineInterface): Promise<boolean> {
+  ffmpegFound ??= (async () => (await has($, 'ffmpeg')) && (await has($, 'ffprobe')))()
+  return ffmpegFound
+}
+
 function videoTool($: EngineInterface): Promise<StripTool | undefined> {
   stripTool ??= (async () => {
     const os = (await $.process.run(['uname', '-s']).catch(() => undefined))?.stdout.trim()
@@ -101,7 +108,8 @@ async function ffmpegStrip($: EngineInterface, video: string, out: string): Prom
   const packets = await probe(['-show_entries', 'packet=pts_time'])
   // Blank lines (the trailing newline) would read as 0 s and count as frames
   const times = packets.stdout.split('\n').filter(line => line.trim() !== '').map(Number).filter(t => Number.isFinite(t) && t >= 0)
-  const duration = Number((await $.process.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', video])).stdout.trim())
+  const container = Number((await $.process.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', video])).stdout.trim())
+  const duration = clipLength(Number.isFinite(container) ? container : 0, times)
   if (!width || !height || !(duration > 0) || times.length === 0) {
     return undefined
   }
@@ -109,7 +117,9 @@ async function ffmpegStrip($: EngineInterface, video: string, out: string): Prom
   const count = grid.columns * grid.rows
   const tile = `tile=${grid.columns}x${grid.rows}:padding=12:margin=12:color=0x17171a`
   const isSeeking = duration > SEEK_ABOVE_SECONDS
-  const samples = sampleTimes(duration, count, isSeeking)
+  // A seek past the last frame exits cleanly but writes no frame, which breaks the tile; keep them before it
+  const last = Math.max(0, ...times)
+  const samples = sampleTimes(duration, count, isSeeking).map(t => (isSeeking ? Math.min(t, Math.max(0, last - 0.05)) : t))
   const made = isSeeking
     ? await seekStrip($, video, out, samples, `scale=-2:${grid.cellHeight}`, tile)
     : await $.process.run(
@@ -140,6 +150,9 @@ async function seekStrip($: EngineInterface, video: string, out: string, samples
 
 // Writes the grid to `out` and returns the clip's timing, or undefined when this machine has neither tool
 export async function filmstrip($: EngineInterface, video: string, out: string, cache: string): Promise<VideoStats | undefined> {
+  if (needsFfmpeg(video)) {
+    return (await hasFfmpeg($)) ? ffmpegStrip($, video, out) : undefined
+  }
   const tool = await videoTool($)
   if (tool === 'swift') {
     return swiftStrip($, video, out, cache)
@@ -163,7 +176,7 @@ export async function playbackSource(
   cache: string,
 ): Promise<Source | undefined> {
   const os = (await $.process.run(['uname', '-s']).catch(() => undefined))?.stdout.trim()
-  if (os === 'Darwin' && (await has($, 'clang'))) {
+  if (os === 'Darwin' && !needsFfmpeg(video) && (await has($, 'clang'))) {
     const bin = `${cache}/framestream`
     if (!(await $.fs.exists(bin))) {
       const frameworks = ['Foundation', 'AVFoundation', 'CoreMedia', 'CoreVideo', 'VideoToolbox', 'ImageIO', 'CoreGraphics'].flatMap(name => ['-framework', name])

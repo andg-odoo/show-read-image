@@ -18,6 +18,7 @@ import {
   isPng,
   isPngPath,
   isVideoPath,
+  needsFfmpeg,
   nativeColumns,
   pack,
   pairOf,
@@ -37,13 +38,14 @@ import {
   videoNote,
 } from './logic'
 import type { PngFile } from './logic'
-import { converter, filmstrip, openExternally, playbackSource, toPng, writeBytes } from './platform'
+import { converter, filmstrip, hasFfmpeg, openExternally, playbackSource, toPng, writeBytes } from './platform'
 import { PLAYER_FPS, current as currentPlayback, playerKey, pause as pausePlayback, play, stop as stopPlayback } from './player'
 
 type Ui = Elements['terminal']
 type Box = { columns: number; rows: number }
 type Size = { width: number; height: number }
-type Shot = { title: string; meta: string; base64: string; size: Size; key?: string }
+// `video`/`duration`: the tile is a video's frame grid, so ⤢ opens the player rather than the picture
+type Shot = { title: string; meta: string; base64: string; size: Size; key?: string; video?: string; duration?: number }
 type Read = { id: string; path: string; file: PngFile }
 type Pic = { base64: string; size: Size }
 type Pair = { stem: string; hint: string; before: Pic; after: Pic }
@@ -281,7 +283,18 @@ function Choice(ui: Ui, key: string, label: string, isActive: boolean, onPress: 
 
 // The footer's actions for one picture: Expand and View at full strength, then Save to Downloads and Copy path
 // where it has a file
-function pictureActions($: EngineInterface, ui: Ui, id: string, label: string, base64: string, path?: string, size?: Size, video?: string, duration?: number) {
+function pictureActions(
+  $: EngineInterface,
+  ui: Ui,
+  id: string,
+  label: string,
+  base64: string,
+  path?: string,
+  size?: Size,
+  video?: string,
+  duration?: number,
+  chapters?: ShowReadImageChapter[],
+) {
   const file = video ?? path
   const fileActions = file
     ? [
@@ -293,7 +306,7 @@ function pictureActions($: EngineInterface, ui: Ui, id: string, label: string, b
         }),
       ]
     : []
-  const elements = [ExpandLink($, ui, id, label, base64, path, size, video, '⤢ Expand', false, duration), ...fileActions]
+  const elements = [ExpandLink($, ui, id, label, base64, path, size, video, '⤢ Expand', false, duration, chapters), ...fileActions]
   const labels = ['⤢ Expand', ...(file ? ['↗ View', 'Save to Downloads', 'Copy path'] : [])]
   return { elements, width: labelsWidth(labels) }
 }
@@ -314,9 +327,27 @@ async function saveToDownloads($: EngineInterface, file: string) {
 }
 
 // Opens the Expand pane on this picture; `key` lets it step through the picture's versions
-function ExpandLink($: EngineInterface, ui: Ui, id: string, label: string, base64: string, key?: string, size?: Size, video?: string, text = '⤢ Expand', isDim = true, duration?: number) {
+function ExpandLink(
+  $: EngineInterface,
+  ui: Ui,
+  id: string,
+  label: string,
+  base64: string,
+  key?: string,
+  size?: Size,
+  video?: string,
+  text = '⤢ Expand',
+  isDim = true,
+  duration?: number,
+  chapters?: ShowReadImageChapter[],
+) {
   const hash = hashOf(base64)
-  const own = { ...(size ? { width: size.width, height: size.height } : {}), ...(video ? { video } : {}), ...(duration ? { duration } : {}) }
+  const own = {
+    ...(size ? { width: size.width, height: size.height } : {}),
+    ...(video ? { video } : {}),
+    ...(duration ? { duration } : {}),
+    ...(chapters && chapters.length > 0 ? { chapters } : {}),
+  }
   const open = async () => {
     remember(expandedBytes, hash, base64)
     await update($, expanded, () => (key ? { label, hash, key, ...own } : { label, hash, ...own }))
@@ -382,7 +413,7 @@ function Panes($: EngineInterface, ui: Ui, id: string, shots: Shot[], box: Box, 
                     <Text wrap="truncate-end">{shot.title}</Text>
                     {hasMeta ? <Text dimColor>{`· ${shot.meta}`}</Text> : null}
                   </Box>
-                  {ExpandLink($, ui, `${id}-pane-${slot.index}`, shot.title, shot.base64, shot.key, shot.size, undefined, '⤢')}
+                  {ExpandLink($, ui, `${id}-pane-${slot.index}`, shot.title, shot.base64, shot.key, shot.size, shot.video, '⤢', true, shot.duration)}
                 </Box>
               </Box>
             )
@@ -692,7 +723,13 @@ async function stripOf($: EngineInterface, video: string): Promise<Picture | und
 // What a path draws as: a picture, or for a video its filmstrip; else why it can't be drawn
 async function pictureOf($: EngineInterface, path: string): Promise<Picture | { reason: string }> {
   if (isVideoPath(path)) {
-    return (await stripOf($, path)) ?? { reason: 'no filmstrip: needs swiftc on macOS, or ffmpeg and ffprobe' }
+    // With the tools there, a failure is the file's: unreadable, or no frames to show
+    const reason = needsFfmpeg(path) && !(await hasFfmpeg($))
+      ? 'WebM needs ffmpeg and ffprobe'
+      : (await hasFfmpeg($))
+        ? "the video couldn't be read: no frames or length found"
+        : 'no filmstrip: needs swiftc on macOS, or ffmpeg and ffprobe'
+    return (await stripOf($, path)) ?? { reason }
   }
   return convertFile($, path)
 }
@@ -899,6 +936,32 @@ async function drawPictures($: EngineInterface, ui: Ui, id: string, card: ShowRe
     return drawRead($, ui, id, only.shot.key, dimensions ? { base64: only.base64, dimensions } : { base64: only.base64 }, columns, false, only.shot.isUnread, video)
   }
   const chosen = await read($, memberOf(pick, { requestId: id }))
+  // Several videos: one player and a list to pick from, not a grid of grids nobody can play
+  if (pictures.every(one => one.shot.isVideo)) {
+    const at = chosen >= 0 && chosen < pictures.length ? chosen : 0
+    const one = pictures[at]!
+    const playlist: Playlist = {
+      items: pictures.map(item => ({ label: item.shot.label, ...(item.shot.duration ? { duration: item.shot.duration } : {}) })),
+      at,
+      pick: async i => {
+        if (currentPlayback()?.site === site) {
+          stopPlayback($)
+        }
+        await update($, memberOf(pick, { requestId: id }), () => i)
+      },
+    }
+    const video: VideoAt = {
+      note: one.shot.note ?? 'video',
+      path: one.shot.key,
+      site,
+      ...(one.shot.samples ? { samples: one.shot.samples } : {}),
+      ...(one.shot.duration ? { duration: one.shot.duration } : {}),
+      ...(one.shot.chapters ? { chapters: one.shot.chapters } : {}),
+      ...(card.title ? { title: card.title } : {}),
+    }
+    const isUnread = pictures.some(item => item.shot.isUnread)
+    return drawVideo($, ui, id, video, { base64: one.base64 }, one.shot.label, hintOf(one.shot.key), isUnread, columns, playlist)
+  }
   const at = chosen >= 0 && chosen < pictures.length ? chosen : -1
   const choose = (to: number) => () => update($, memberOf(pick, { requestId: id }), () => to)
   const isPair = pictures.length === 2
@@ -911,7 +974,10 @@ async function drawPictures($: EngineInterface, ui: Ui, id: string, card: ShowRe
         : [{ to: -1, label: 'All' }, ...pictures.slice(1).map((one, i) => ({ to: i + 1, label: `vs ${one.shot.label}` }))]
   const chips = options.map(one => Choice(ui, `pick-${one.to}`, one.label, at === one.to, choose(one.to)))
   const shown = at < 0 ? pictures : isPair ? [pictures[at]!] : [pictures[0]!, pictures[at]!]
-  const tile = (one: (typeof pictures)[number]) => ({ ...shot(one.shot.label, diskPic(one.base64)), ...(one.shot.isVideo ? { meta: 'video' } : {}) })
+  const tile = (one: (typeof pictures)[number]): Shot => ({
+    ...shot(one.shot.label, diskPic(one.base64)),
+    ...(one.shot.isVideo ? { meta: one.shot.duration ? clockOf(one.shot.duration, true) : 'video', video: one.shot.key, ...(one.shot.duration ? { duration: one.shot.duration } : {}) } : {}),
+  })
   const panes = Panes($, ui, `${id}-card`, shown.map(tile), wide(columns), 6, isPair || at >= 0 ? 2 : 3)
   const meta = pictures.length > 1 ? `${pictures.length} images` : pixels(diskPic(only.base64).size)
   const paths = pictures.map(one => one.shot.key).filter(key => key.startsWith('/'))
@@ -943,7 +1009,7 @@ type VideoAt = { note: string; path: string; site?: string; samples?: string; du
 async function startVideo($: EngineInterface, site: string, video: string, from: number, size: { width: number; height: number }) {
   const source = await playbackSource($, video, size, from, PLAYER_FPS, await convertedDir($))
   if (!source) {
-    await $.ui.toast('show-read-image: playing a video needs clang on macOS, or ffmpeg')
+    await $.ui.toast(needsFfmpeg(video) ? 'show-read-image: playing WebM needs ffmpeg' : 'show-read-image: playing a video needs clang on macOS, or ffmpeg')
     return
   }
   play($, site, video, from, size, source)
@@ -1004,14 +1070,57 @@ function chaptersWidth(chapters: ShowReadImageChapter[]) {
   return Math.min(44, Math.max(...chapters.map((one, i) => `${i + 1}. ${one.label}`.length + 2 + clockOf(one.at, true).length)))
 }
 
+// The clips of a card holding several videos; one plays at a time, picked from the list beside the player
+type Playlist = { items: { label: string; duration?: number }[]; at: number; pick: (i: number) => unknown }
+
+const PLAYLIST_WIDTH = 40
+
+// "name  0:47", the name cut short with … so the length stays on the row
+function playlistRow(item: Playlist['items'][number]) {
+  const time = item.duration ? clockOf(item.duration, true) : ''
+  const room = PLAYLIST_WIDTH - 2 - (time ? time.length + 2 : 0)
+  const label = item.label.length > room ? `${item.label.slice(0, Math.max(1, room - 1))}…` : item.label
+  return time ? `${label}  ${time}` : label
+}
+
+function playlistWidth(playlist: Playlist) {
+  return Math.min(PLAYLIST_WIDTH, Math.max('Videos'.length, ...playlist.items.map(item => playlistRow(item).length + 2)))
+}
+
+function PlaylistColumn(ui: Ui, site: string, playlist: Playlist) {
+  const { Box, Text } = ui
+  return (
+    <Box key={`${site}-playlist`} flexDirection="column" width={playlistWidth(playlist)}>
+      <Text dimColor>Videos</Text>
+      {playlist.items.map((item, i) =>
+        i === playlist.at
+          ? <Text key={`${site}-clip-${i}`} bold wrap="truncate-end">{`▸ ${playlistRow(item)}`}</Text>
+          : Link(ui, `${site}-clip-${i}`, `  ${playlistRow(item)}`, () => playlist.pick(i)),
+      )}
+    </Box>
+  )
+}
+
 // A video's card: its frames at rest, the clip itself once played here, with the scrub bar and any chapters
-async function drawVideo($: EngineInterface, ui: Ui, requestId: string, video: VideoAt, file: PngFile, stem: string, hint: string, isUnread: boolean, columns: number | undefined) {
+async function drawVideo(
+  $: EngineInterface,
+  ui: Ui,
+  requestId: string,
+  video: VideoAt,
+  file: PngFile,
+  stem: string,
+  hint: string,
+  isUnread: boolean,
+  columns: number | undefined,
+  playlist?: Playlist,
+) {
   const { Box, Image, Text } = ui
   const site = video.site ?? requestId
   const playing = currentPlayback()
   const p = playing?.video === video.path && playing.site === site ? playing : undefined
   const chapters = video.chapters ?? []
-  const side = chapters.length > 0 ? chaptersWidth(chapters) + 3 : 0
+  const listWidth = playlist ? playlistWidth(playlist) : 0
+  const side = Math.max(chapters.length > 0 ? chaptersWidth(chapters) : 0, listWidth) + (chapters.length > 0 || playlist ? 3 : 0)
   const box = room(columns)
   const media = { columns: Math.max(20, box.columns - side), rows: box.rows }
   const decode = playerBox(media.columns, media.rows + 3, cellWidth, cell, 3)
@@ -1033,17 +1142,23 @@ async function drawVideo($: EngineInterface, ui: Ui, requestId: string, video: V
         {bar}
         {samples}
       </Box>
-      {chapters.length > 0 ? Chapters(ui, site, chapters, start) : null}
+      {playlist || chapters.length > 0 ? (
+        <Box flexDirection="column" gap={1} flexShrink={0}>
+          {playlist ? PlaylistColumn(ui, site, playlist) : null}
+          {chapters.length > 0 ? Chapters(ui, site, chapters, start) : null}
+        </Box>
+      ) : null}
     </Box>
   )
-  const actions = pictureActions($, ui, requestId, stem, file.base64, video.path, size, video.path, video.duration)
+  const actions = pictureActions($, ui, requestId, stem, file.base64, video.path, size, video.path, video.duration, video.chapters)
   // At rest the card offers to play; once played, Frames goes back to the grid
   const left = p
     ? [Choice(ui, `${site}-video`, 'Video', true, () => undefined), Link(ui, `${site}-frames`, 'Frames', () => stopPlayback($))]
     : [<ui.Button key={`${site}-play`} plain label="▶ Play" onPress={() => void start(0)} />]
   const footer = { left, right: actions.elements, width: labelsWidth(p ? ['Video', 'Frames'] : ['▶ Play']) + 3 + actions.width }
   const mediaWidth = Math.max(cells.columns, !p && video.samples ? video.samples.length : 0)
-  const frameAt: FrameAt = { title: video.title ?? stem, hint, meta: video.note, width: mediaWidth + side, max: box.columns, isUnread, footer }
+  const meta = playlist ? `${playlist.items.length} videos · ${video.note}` : video.note
+  const frameAt: FrameAt = { title: video.title ?? stem, hint, meta, width: mediaWidth + side, max: box.columns, isUnread, footer }
   return Frame(ui, frameAt, body)
 }
 
@@ -1061,11 +1176,23 @@ async function notePaneSize($: EngineInterface, columns: number, rows: number) {
 let wantedBox: { width: number; height: number } | undefined
 
 // The Expand pane for a video: its filmstrip with [ play ], then live frames with pause, restart and the frame rate
-async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: number, video: string, label: string, strip: string, duration: number) {
+async function drawPlayer(
+  $: EngineInterface,
+  ui: Ui,
+  columns: number,
+  rows: number,
+  video: string,
+  label: string,
+  strip: string,
+  duration: number,
+  chapters: ShowReadImageChapter[],
+) {
   const { Box, Button, Image, Text } = ui
   const playing = currentPlayback()
   const p = playing?.video === video && playing.site === PANE ? playing : undefined
-  const box = playerBox(columns, rows, cellWidth, cell, 4)
+  // The pane is usually a narrow column, so chapters sit under the bar and take rows from the picture
+  const chapterRows = chapters.length > 0 ? Math.min(chapters.length, 8) + 2 : 0
+  const box = playerBox(columns, rows - chapterRows, cellWidth, cell, 4)
   const start = (from: number, size = box) => startVideo($, PANE, video, from, size)
   if (playing && !p) {
     // Expanded while its card was playing: the pane carries on from the same moment
@@ -1089,7 +1216,7 @@ async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: num
   }
   const frame = p?.first ?? p?.last
   const picture = frame ?? strip
-  const cells = fit(pngSize(picture) ?? UNKNOWN, columns, Math.max(4, rows - 4), cell)
+  const cells = fit(pngSize(picture) ?? UNKNOWN, columns, Math.max(4, rows - 4 - chapterRows), cell)
   const status = !p
     ? 'frames'
     : p.status === 'failed'
@@ -1112,6 +1239,7 @@ async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: num
         [<Text key="player-label" bold>{label}</Text>, <Text key="player-status" dimColor>{status}</Text>],
         [Link(ui, 'player-restart', '↺ Restart', () => start(0)), Link(ui, 'pane-close', 'Close', () => $.ui.close({ id: PANE }))],
       )}
+      {chapters.length > 0 ? <Box marginTop={1}>{Chapters(ui, 'player', chapters.slice(0, 8), start)}</Box> : null}
     </Box>
   )
 }
@@ -1142,7 +1270,8 @@ export const register: Register = on => {
       description:
         'Show image or video files to the user under this call, without loading them into your context. The card says they were not read by you, ' +
         'so Read an image instead when you need to see it yourself or make claims about it. One image draws on its own; several share one frame, ' +
-        'side by side, in the order given. A video (.mov/.mp4/.m4v) shows as a grid of frames the user can play in place. Each item: path, ' +
+        'side by side, in the order given. A video (.mov/.mp4/.m4v/.webm) shows as a grid of frames the user can play in place; several videos ' +
+        'share one player with a list to pick from. Each item: path, ' +
         'optional label, optional version (0 = the file as it is now; -1 = the version kept before it, -2 the one before that), and for a video ' +
         'optional chapters ({ label, at } in seconds) to jump to.',
       isDeferred: true,
@@ -1233,7 +1362,7 @@ export const register: Register = on => {
     }
     void notePaneSize($, e.props.bodyColumns, e.props.scroll.bodyRows)
     if (shown.video) {
-      return drawPlayer($, ui, e.props.bodyColumns, e.props.scroll.bodyRows, shown.video, shown.label, base64, shown.duration ?? 0)
+      return drawPlayer($, ui, e.props.bodyColumns, e.props.scroll.bodyRows, shown.video, shown.label, base64, shown.duration ?? 0, shown.chapters ?? [])
     }
     const size = pngSize(base64) ?? UNKNOWN
     const cells = fit(size, e.props.bodyColumns, Math.max(4, e.props.scroll.bodyRows - 2), cell)
