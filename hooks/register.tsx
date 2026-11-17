@@ -566,9 +566,8 @@ async function collect(
     }
   } else {
     const command = tool === 'Bash' && typeof input.command === 'string' ? input.command : undefined
-    const base = command ? await $.session.cwd().catch(() => '/') : '/'
-    for (const path of imagePathsIn(text, command, base, await homeOf($))) {
-      // Only what this call wrote: a path it merely mentioned keeps its older modification time
+    for (const path of imagePathsIn(text, command)) {
+      // Only what this call wrote: a path it merely printed keeps its older modification time
       const stat = await $.fs.stat(path).catch(() => undefined)
       if (!stat || stat.mtimeMs < startedAt - 1000) {
         continue
@@ -648,9 +647,9 @@ async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadIm
   if (card.isCommand) {
     const shown = await read($, seen)
     const later = (shot: ShowReadImageCardShot) => (shown[`${shot.key}#${shot.hash}`] ?? -Infinity) >= (card.at ?? Infinity)
+    // A later Read already shows it, so this card adds nothing
     if (card.shots.length > 0 && card.shots.every(later)) {
-      const names = card.shots.map(one => splitPath(one.key).name).join(', ')
-      return <ui.Text dimColor>{`  ${names} · shown by a Read below`}</ui.Text>
+      return undefined
     }
   }
   const pictures: { shot: ShowReadImageCardShot; base64: string }[] = []
@@ -768,7 +767,7 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => (next.called ? { deny: 'show-read-image: the tool call failed under its hook.' } : next(e)))
 
-  // Images any other tool produced: inline blocks, or image files it printed or, for an image-making command, named
+  // Images any other tool produced: inline blocks, or image files it printed
   on('tool.call', async ($, e, next) => {
     const startedAt = await $.clock.now()
     const ran = await next(e)

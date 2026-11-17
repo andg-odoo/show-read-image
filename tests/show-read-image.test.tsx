@@ -199,32 +199,17 @@ test('a mixed group draws its pair frame first, then a gallery of the rest', asy
   await row.unmount()
 })
 
-test('image paths come from what a command printed or, for an image maker, what it named', () => {
-  expect(commandKind('screencapture -x /tmp/a.png')).toBe('maker')
-  expect(commandKind('cd /w && xcrun simctl io booted screenshot /tmp/s.png')).toBe('maker')
-  expect(commandKind('FOO=1 magick in.jpg /tmp/out.png')).toBe('maker')
+test('image paths come from what a tool printed, never from a listing', () => {
   expect(commandKind('ls -la shots/')).toBe('listing')
-  expect(commandKind('git status --short')).toBe('listing')
-  expect(commandKind('rg -l png src')).toBe('listing')
+  expect(commandKind('cd /w && git status --short')).toBe('listing')
+  expect(commandKind('D=/tmp/x; rg -l png src')).toBe('listing')
   expect(commandKind('npm run build')).toBe('other')
 
-  expect(imagePathsIn('', 'screencapture -x "/tmp/a.png"')).toEqual(['/tmp/a.png'])
   expect(imagePathsIn('Wrote screenshot to: /tmp/s.png', 'xcrun simctl io booted screenshot /tmp/s.png')).toEqual(['/tmp/s.png'])
-  expect(imagePathsIn('/w/shots/a.png\n/w/shots/b.png', 'ls /w/shots/*.png')).toEqual([])
   expect(imagePathsIn('saved /tmp/chart.png', 'python plot.py')).toEqual(['/tmp/chart.png'])
-  // A build naming an image in its arguments did not necessarily make it
-  expect(imagePathsIn('', 'cp /a/in.png /b/out.png')).toEqual([])
-  // A maker's image is its last image argument, resolved against where it ran
-  expect(imagePathsIn('', 'sips -s format jpeg /a/in.png --out /b/out.jpg')).toEqual(['/b/out.jpg'])
-  expect(imagePathsIn('', 'magick in.jpg out.png', '/work', '/home/me')).toEqual(['/work/out.png'])
-  expect(imagePathsIn('', 'cd ~/shots && screencapture -x now.png', '/work', '/home/me')).toEqual(['/home/me/shots/now.png'])
-  expect(imagePathsIn('', 'screencapture -x $OUT/now.png', '/work', '/home/me')).toEqual([])
-  // Assignments and a cd anywhere before the image command, as a test script writes them
-  expect(imagePathsIn('', "D=/tmp/x; mkdir -p $D && cd $D && convert -size 9x9 xc:red -draw 'circle 4,4 4,1' shot.png", '/work', '/home/me')).toEqual([
-    '/tmp/x/shot.png',
-  ])
-  expect(imagePathsIn('', 'OUT="$HOME/shots"; screencapture -x "${OUT}/now.png"', '/work', '/home/me')).toEqual(['/home/me/shots/now.png'])
-  expect(commandKind('D=/tmp/x; mkdir -p $D && convert a.jpg $D/b.png')).toBe('maker')
+  expect(imagePathsIn('/w/shots/a.png\n/w/shots/b.png', 'ls /w/shots/*.png')).toEqual([])
+  // A command that names an image without printing it makes no card; the agent Reads or show_images it
+  expect(imagePathsIn('', 'screencapture -x /tmp/a.png')).toEqual([])
   expect(imagePathsIn(JSON.stringify({ screenshotPath: '/t/full.png', thumbnailPath: '/t/thumb.png' }))).toEqual(['/t/full.png'])
   expect(imagePathsIn('/a/1.png /a/2.png /a/3.png /a/4.png /a/5.png', 'make shots')).toHaveLength(4)
 
@@ -284,7 +269,7 @@ test('a screenshot a Bash command wrote draws under its row, marked as not read'
   expect((await ui.find({ type: 'Text', text: /not read by the agent/ }))?.text).toContain('8×4')
   await ui.unmount()
 
-  // Once a Read shows the same picture, the command's card folds to one line
+  // Once a Read shows the same picture, the command's card draws nothing
   await $.tool.call({ tool: 'Read', file_path: '/tmp/s.png', tool_use_id: 'read-s' })
   const folded = await $.ui.mount({
     plugin: 'show-read-image',
@@ -295,7 +280,8 @@ test('a screenshot a Bash command wrote draws under its row, marked as not read'
     props: { tool_use_id: 'bash-1', tool: 'Bash', input: { command: 'x' }, isRunning: false, isErrored: false, isInterrupted: false, output: 'ok' },
   })
   expect(await folded.findAll({ type: 'Image' })).toHaveLength(0)
-  expect(await folded.find({ type: 'Text', text: /s\.png · shown by a Read below/ })).toBeDefined()
+  expect(await folded.find({ type: 'Text', text: /shown by a Read/ })).toBeUndefined()
+  expect(await folded.find({ type: 'Text', text: 'engine row' })).toBeDefined()
   await folded.unmount()
 
   await $.tool.call({ tool: 'Bash', command: 'sips -Z 64 /tmp/old.png', tool_use_id: 'bash-2' })
@@ -448,7 +434,7 @@ test('a tool card still draws after its path has kept ten newer versions, and Gl
   await glob.unmount()
 })
 
-test('a command that made the pair a group then reads draws it once', async ($, on) => {
+test('a command that printed the pair a group then reads draws it once', async ($, on) => {
   mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
   mock.store(on)
   mock.env(on, { HOME: '/home/me' })
@@ -461,12 +447,12 @@ test('a command that made the pair a group then reads draws it once', async ($, 
     return { value: { kind: 'file' as const, size: 90, mtimeMs: Date.UTC(2026, 10, 17, 12), isLink: false } }
   })
   on('fs.read', (_, e) => ({ value: { base64: disk.get(e.path) ?? '' } }))
-  on('tool.call', () => ({ result: 'ok', text: '' }))
+  on('tool.call', () => ({ result: 'ok', text: 'made /s/btn.before.png and /s/btn.after.png' }))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>engine line</Text>
   })
-  await $.tool.call({ tool: 'Bash', command: 'convert -size 8x4 xc:red /s/btn.before.png && convert -size 8x4 xc:blue /s/btn.after.png', tool_use_id: 'make' })
+  await $.tool.call({ tool: 'Bash', command: './make-buttons.sh', tool_use_id: 'make' })
   await new Promise<void>(done => setTimeout(done, 30))
   const group = await $.ui.mount({
     plugin: 'show-read-image',

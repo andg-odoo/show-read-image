@@ -208,67 +208,23 @@ export function pixels(size: { width: number; height: number }) {
 
 export const MAX_TOOL_CARDS = 4
 
-// Commands that write an image without printing its path; their image arguments are what they made
-const MAKERS = /^(screencapture|sips|magick|convert|ffmpeg|rsvg-convert|xcrun\s+simctl\s+io\b.*\bscreenshot|simctl\s+io\b.*\bscreenshot|import|grim|scrot|maim)\b/
 // Commands that print paths of files they did not make
 const LISTINGS = /^(ls|find|fd|fdfind|rg|grep|tree|du|stat|file|git\s+(status|diff|log|show|ls-files))\b/
 
-export type CommandKind = 'maker' | 'listing' | 'other'
+export type CommandKind = 'listing' | 'other'
 
-type Walk = { kind: CommandKind; maker?: { segment: string; dir: string; vars: Record<string, string> } }
-
-const ASSIGNMENT = /^(\w+)=("[^"]*"|'[^']*'|\S*)$/
-
-function unquote(text: string) {
-  return text.replace(/^["']|["']$/g, '')
-}
-
-// $NAME and ${NAME} from earlier assignments in the same command, and $HOME; undefined if any stays unknown
-function expand(text: string, vars: Record<string, string>, home: string): string | undefined {
-  const out = text.replace(/\$\{?(\w+)\}?/g, (whole, name: string) => (name === 'HOME' ? home : (vars[name] ?? whole)))
-  return out.includes('$') ? undefined : out
-}
-
-// Follows a command's segments as a shell would for what matters here: assignments, cd, and the last image command
-function walk(command: string, base: string, home: string): Walk {
-  const vars: Record<string, string> = {}
-  let dir = base
-  let first: string | undefined
-  let maker: Walk['maker']
-  for (const raw of command.split(/&&|\|\||;|\|/)) {
-    const assignment = ASSIGNMENT.exec(raw.trim())
-    if (assignment) {
-      const value = expand(unquote(assignment[2]!), vars, home)
-      if (value !== undefined) {
-        vars[assignment[1]!] = value
-      }
-      continue
-    }
-    const segment = raw.trim().replace(/^(\w+=\S*\s+)+/, '')
-    const cd = /^cd\s+(\S+)/.exec(segment)?.[1]
-    if (cd) {
-      const to = expand(unquote(cd), vars, home)
-      dir = to === undefined ? dir : absolute(to, dir, home)
-      continue
-    }
-    if (!segment) {
-      continue
-    }
-    first ??= segment
-    if (MAKERS.test(segment)) {
-      maker = { segment, dir, vars: { ...vars } }
-    }
-  }
-  return { kind: maker ? 'maker' : first && LISTINGS.test(first) ? 'listing' : 'other', ...(maker ? { maker } : {}) }
-}
-
+// The first real command of the line decides, after env assignments and a leading cd ... &&
 export function commandKind(command: string): CommandKind {
-  return walk(command, '/', '/').kind
+  const first =
+    command
+      .split(/&&|\|\||;|\|/)
+      .map(part => part.trim().replace(/^(\w+=\S*\s+)+/, ''))
+      .find(part => part && !/^cd\s/.test(part) && !/^\w+=\S*$/.test(part)) ?? ''
+  return LISTINGS.test(first) ? 'listing' : 'other'
 }
 
 const PATH_IN_TEXT = /(?:^|[\s"'=(:])(\/[^\s"'()<>]+?\.(?:png|jpe?g))(?=$|[\s"'),;<>])/gi
 const IMAGE_PATH = /^\/.+\.(png|jpe?g)$/i
-const IMAGE_FILE = /\.(png|jpe?g)$/i
 
 // A JSON result names paths whose keys say what they are; a thumbnail beside a full image is a duplicate
 function jsonPaths(text: string): string[] {
@@ -296,32 +252,14 @@ function jsonPaths(text: string): string[] {
   return (full.length > 0 ? full : hits).map(hit => hit.path)
 }
 
-function absolute(token: string, base: string, home: string) {
-  if (token.startsWith('/')) {
-    return token
+// Image paths a tool call printed, taking a JSON result's full image over its thumbnail; a listing's are not its own
+export function imagePathsIn(output: string, command?: string): string[] {
+  if (command !== undefined && commandKind(command) === 'listing') {
+    return []
   }
-  if (token === '~' || token.startsWith('~/')) {
-    return home + token.slice(1)
-  }
-  return `${base.replace(/\/$/, '')}/${token.replace(/^\.\//, '')}`
-}
-
-// Image paths a tool call made: printed in its output, or, for an image-making command, the image it wrote,
-// which is its last image argument (`sips in.png --out out.png`, `magick in.jpg out.png`)
-export function imagePathsIn(output: string, command?: string, base = '/', home = '/'): string[] {
-  const walked = command === undefined ? { kind: 'other' as const } : walk(command, base, home)
   const fromJson = jsonPaths(output.trim())
-  const printed = walked.kind === 'listing' ? [] : fromJson.length > 0 ? fromJson : [...output.matchAll(PATH_IN_TEXT)].map(m => m[1]!)
-  const maker = 'maker' in walked ? walked.maker : undefined
-  const made = maker
-    ? maker.segment
-        .split(/\s+/)
-        .map(token => expand(unquote(token), maker.vars, home))
-        .filter((token): token is string => token !== undefined && IMAGE_FILE.test(token))
-        .slice(-1)
-        .map(token => absolute(token, maker.dir, home))
-    : []
-  return [...new Set([...printed, ...made])].slice(0, MAX_TOOL_CARDS)
+  const printed = fromJson.length > 0 ? fromJson : [...output.matchAll(PATH_IN_TEXT)].map(m => m[1]!)
+  return [...new Set(printed)].slice(0, MAX_TOOL_CARDS)
 }
 
 export type ImageBlock = { base64: string; mime: string }

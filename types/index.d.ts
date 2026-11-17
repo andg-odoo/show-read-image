@@ -8,7 +8,7 @@ export type ShowReadImageView = 'now' | 'side'
 
 export type ShowReadImageCardShot = { key: string; label: string; hash: string; isUnread: boolean }
 
-// `isCommand`: made by a tool or command rather than shown on purpose; it folds away once a later Read shows it
+// `isCommand`: made by a tool or command rather than shown on purpose; it is not drawn once a later Read shows it
 export type ShowReadImageCard = { title?: string; shots: ShowReadImageCardShot[]; at?: number; isCommand?: boolean }
 
 declare module 'claude-code' {

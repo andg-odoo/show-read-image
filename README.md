@@ -3,13 +3,10 @@
 A Claude Code mod that draws images inline in the transcript, under the tool call that made them.
 
 - **Reads.** The PNGs the Read tool opens. Several read in one group are drawn side by side, each framed with its name.
-- **Other tools.** Images any other tool produced:
-  - inline image blocks, as MCP servers return them;
-  - image paths a command printed;
-  - for commands that make an image without printing its path (`screencapture`, `simctl io … screenshot`, `sips`,
-    `magick`, `ffmpeg`, …), the paths named in the command.
-
-  Listing and search commands (`ls`, `find`, `rg`, `git status`, …) are ignored, and a call draws at most four images.
+- **Other tools.** Images any other tool produced: inline image blocks, as MCP servers return them, and image files
+  a command printed and wrote during the call. Listing and search commands (`ls`, `find`, `rg`, `git status`, …) are
+  ignored, and a call draws at most four images. A command that writes an image without printing its path draws
+  nothing; Read it, or show it with `show_images`.
 - **`show_images` tool.** A deferred tool that shows image files without the agent loading them, with a title, labels
   and `version: -1` for the previous version of a path.
 - **Marked when unread.** Any card drawn from a file the agent never loaded says "not read by the agent", so it is
@@ -24,7 +21,7 @@ A Claude Code mod that draws images inline in the transcript, under the tool cal
 - **Size.** Pictures are sized from the terminal's measured cells. Small ones draw up to twice their pixels (2× under
   400 px, tapering to 1× at 800), larger ones at their own size, never narrower than 16 columns, and within 60% of
   the visible rows.
-- **No duplicates.** A card a command made folds to one dim line once a later Read shows the same picture.
+- **No duplicates.** A command's card is not drawn once a later Read shows the same picture.
 
 JPEGs, and PNGs over the 2 MiB an image may take, are converted and scaled down with whichever of `sips`, `magick`,
 `convert` or `ffmpeg` the machine has. Without one of them, those images get no card.
