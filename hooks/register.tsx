@@ -33,7 +33,7 @@ import {
   videoNote,
 } from './logic'
 import type { PngFile } from './logic'
-import { filmstrip, openExternally, toPng, writeBytes } from './platform'
+import { converter, filmstrip, openExternally, toPng, writeBytes } from './platform'
 
 type Ui = Elements['terminal']
 type Box = { columns: number; rows: number }
@@ -536,13 +536,24 @@ async function plan($: EngineInterface, reads: Read[]) {
 }
 
 // A PNG of the file under the 2 MiB an Image takes: as it is, or converted and scaled down
-async function pngOfFile($: EngineInterface, path: string): Promise<string | undefined> {
+type Converted = { base64: string } | { reason: string }
+
+function megabytes(bytes: number) {
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+// A PNG of the file under the 2 MiB an Image takes, or why there is none, for a card to say so
+async function convertFile($: EngineInterface, path: string): Promise<Converted> {
   const stat = await $.fs.stat(path).catch(() => undefined)
   if (!stat || stat.kind !== 'file') {
-    return undefined
+    return { reason: 'not found' }
   }
   if (isPngPath(path) && stat.size <= MAX_PNG) {
-    return readDisk($, path)
+    const base64 = await readDisk($, path)
+    return base64 ? { base64 } : { reason: 'unreadable' }
+  }
+  if (!(await converter($))) {
+    return { reason: `${megabytes(stat.size)}, too large to draw without sips, magick, convert or ffmpeg` }
   }
   // One set of conversions per source path, redone when the source is newer
   const out = convertedOf(await convertedDir($), path)
@@ -550,14 +561,47 @@ async function pngOfFile($: EngineInterface, path: string): Promise<string | und
     const to = `${out}-${side}.png`
     const made = await $.fs.stat(to).catch(() => undefined)
     if ((!made || made.mtimeMs < stat.mtimeMs) && !(await toPng($, path, to, side))) {
-      return undefined
+      return { reason: `${megabytes(stat.size)}, the converter failed on it` }
     }
+    void pruneConverted($)
     const size = (await $.fs.stat(to).catch(() => undefined))?.size ?? Infinity
     if (size <= MAX_PNG) {
-      return readDisk($, to)
+      const base64 = await readDisk($, to)
+      return base64 ? { base64 } : { reason: 'unreadable after converting' }
     }
   }
-  return undefined
+  return { reason: `${megabytes(stat.size)}, still over 2 MiB at ${SIDES.at(-1)} px` }
+}
+
+async function pngOfFile($: EngineInterface, path: string): Promise<string | undefined> {
+  const converted = await convertFile($, path)
+  return 'base64' in converted ? converted.base64 : undefined
+}
+
+// The converted folder keeps the newest files up to these limits; conversions are remade when needed
+const CACHE_BYTES = 200 * 1024 * 1024
+const CACHE_FILES = 500
+let prunedAt = 0
+
+async function pruneConverted($: EngineInterface) {
+  const now = await $.clock.now()
+  if (now - prunedAt < 60_000) {
+    return
+  }
+  prunedAt = now
+  const dir = await convertedDir($)
+  const files = (await $.fs.list(dir).catch(() => []))
+    .filter(entry => entry.kind === 'file')
+    .map(entry => ({ path: `${dir}/${entry.name}`, size: entry.size, at: entry.mtimeMs }))
+    .sort((a, b) => b.at - a.at)
+  let total = 0
+  const gone = files.filter((file, i) => {
+    total += file.size
+    return total > CACHE_BYTES || i >= CACHE_FILES
+  })
+  if (gone.length > 0) {
+    await $.process.run(['rm', '-f', ...gone.map(file => file.path)]).catch(() => undefined)
+  }
 }
 
 // Longest sides to try, largest first, until a conversion fits in 2 MiB; noise and photos need the small ones
@@ -618,14 +662,15 @@ async function stripOf($: EngineInterface, video: string): Promise<Picture | und
   return base64 ? { base64, ...stripNotes.get(key)!, isVideo: true } : undefined
 }
 
-// What a path draws as: a picture, or for a video its filmstrip
-async function pictureOf($: EngineInterface, path: string): Promise<Picture | undefined> {
+// What a path draws as: a picture, or for a video its filmstrip; else why it can't be drawn
+async function pictureOf($: EngineInterface, path: string): Promise<Picture | { reason: string }> {
   if (isVideoPath(path)) {
-    return stripOf($, path)
+    return (await stripOf($, path)) ?? { reason: 'no filmstrip: needs swiftc on macOS, or ffmpeg and ffprobe' }
   }
-  const base64 = await pngOfFile($, path)
-  return base64 ? { base64 } : undefined
+  return convertFile($, path)
 }
+
+const failure = (path: string, reason: string) => `${splitPath(path).name}: ${reason}`
 
 function shotOf(path: string, picture: Picture, label = splitPath(path).stem): ShowReadImageCardShot {
   const video = picture.isVideo ? { note: picture.note ?? '', ...(picture.samples ? { samples: picture.samples } : {}), isVideo: true } : {}
@@ -644,6 +689,7 @@ async function collect(
 ) {
   const short = tool.split('__').pop() ?? tool
   const shots: ShowReadImageCardShot[] = []
+  const failed: string[] = []
   const blocks = imageBlocks(result)
   if (blocks.length > 0) {
     const { tool: _tool, tool_use_id: _id, ...args } = input
@@ -665,14 +711,16 @@ async function collect(
         continue
       }
       const picture = await pictureOf($, path)
-      if (picture) {
+      if ('reason' in picture) {
+        failed.push(failure(path, picture.reason))
+      } else {
         await record($, path, picture.base64)
         shots.push(shotOf(path, picture))
       }
     }
   }
-  if (shots.length > 0) {
-    await keepCard($, id, { shots, at: startedAt, isCommand: true })
+  if (shots.length > 0 || failed.length > 0) {
+    await keepCard($, id, { shots, at: startedAt, isCommand: true, ...(failed.length > 0 ? { failed } : {}) })
   }
 }
 
@@ -701,11 +749,13 @@ type ShowInput = { images: { path: string; label?: string; version?: number }[];
 async function show($: EngineInterface, id: string, input: ShowInput): Promise<string> {
   const shots: ShowReadImageCardShot[] = []
   const missing: string[] = []
+  const failed: string[] = []
   const notes: string[] = []
   for (const image of input.images.slice(0, MAX_SIDE)) {
     const picture = await pictureOf($, image.path)
-    if (!picture) {
-      missing.push(isVideoPath(image.path) ? `${image.path} (needs swiftc on macOS, or ffmpeg and ffprobe)` : image.path)
+    if ('reason' in picture) {
+      missing.push(`${image.path} (${picture.reason})`)
+      failed.push(failure(image.path, picture.reason))
       continue
     }
     const base64 = picture.base64
@@ -722,8 +772,9 @@ async function show($: EngineInterface, id: string, input: ShowInput): Promise<s
     }
     shots.push({ ...shotOf(image.path, picture, image.label), hash: versions[at]?.hash ?? hashOf(base64) })
   }
-  if (shots.length > 0) {
-    await keepCard($, id, input.title === undefined ? { shots } : { title: input.title, shots })
+  if (shots.length > 0 || failed.length > 0) {
+    const card: ShowReadImageCard = { shots, ...(input.title === undefined ? {} : { title: input.title }), ...(failed.length > 0 ? { failed } : {}) }
+    await keepCard($, id, card)
   }
   const shown = `Shown ${shots.length} image(s) to the user, marked as not read by you.`
   return [shown, ...notes.map(note => `Note: ${note}.`), ...(missing.length > 0 ? [`Could not show: ${missing.join(', ')}`] : [])].join(' ')
@@ -732,8 +783,10 @@ async function show($: EngineInterface, id: string, input: ShowInput): Promise<s
 // A Read that came back as JPEG or another type: converted to PNG and drawn as a card, since an Image takes PNG bytes
 async function readAsCard($: EngineInterface, id: string, path: string, image: PngFile) {
   // The file itself converts best; Read's copy is the fallback when the file is gone or unreadable
-  const png = (await pngOfFile($, path)) ?? (await pngOfBlock($, image.base64, id))
+  const converted = await convertFile($, path)
+  const png = 'base64' in converted ? converted.base64 : await pngOfBlock($, image.base64, id)
   if (!png) {
+    await keepCard($, id, { shots: [], failed: [failure(path, 'reason' in converted ? converted.reason : 'could not be converted')] })
     return
   }
   await record($, path, png)
@@ -750,7 +803,22 @@ async function bytesOf($: EngineInterface, shot: ShowReadImageCardShot) {
 }
 
 // One picture draws as a read does, with its versions; several share a frame
+// A card's pictures, with a dim line under them for each one that couldn't be drawn
 async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadImageCard, columns: number | undefined) {
+  const drawn = await drawPictures($, ui, id, card, columns)
+  const failures = (card.failed ?? []).map((line, i) => <ui.Text key={`${id}-failed-${i}`} dimColor>{`  ⚠ ${line}`}</ui.Text>)
+  if (failures.length === 0) {
+    return drawn
+  }
+  return (
+    <ui.Box flexDirection="column">
+      {drawn ?? null}
+      {failures}
+    </ui.Box>
+  )
+}
+
+async function drawPictures($: EngineInterface, ui: Ui, id: string, card: ShowReadImageCard, columns: number | undefined) {
   if (card.isCommand) {
     const shown = await read($, seen)
     const later = (shot: ShowReadImageCardShot) => (shown[`${shot.key}#${shot.hash}`] ?? -Infinity) >= (card.at ?? Infinity)

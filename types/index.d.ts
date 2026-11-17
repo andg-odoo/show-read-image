@@ -23,7 +23,8 @@ export type ShowReadImageCardShot = {
 }
 
 // `isCommand`: made by a tool or command rather than shown on purpose; it is not drawn once a later Read shows it
-export type ShowReadImageCard = { title?: string; shots: ShowReadImageCardShot[]; at?: number; isCommand?: boolean }
+// `failed`: pictures that couldn't be drawn, each `name: reason`, shown instead of a blank space
+export type ShowReadImageCard = { title?: string; shots: ShowReadImageCardShot[]; at?: number; isCommand?: boolean; failed?: string[] }
 
 declare module 'claude-code' {
   interface PluginState {
