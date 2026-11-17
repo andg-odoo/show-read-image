@@ -17,6 +17,16 @@ export function pngOf(tool: string, output: unknown): PngFile | undefined {
   return { base64: result.file.base64, dimensions: result.file.dimensions }
 }
 
+// A Read result that is an image but not a PNG: Read re-encodes pictures too large to send as they are
+export function otherImageOf(tool: string, output: unknown): (PngFile & { type: string }) | undefined {
+  const result = output as ReadImage | undefined
+  const type = result?.file?.type ?? ''
+  if (tool !== 'Read' || result?.type !== 'image' || !type.startsWith('image/') || type === 'image/png' || !result.file?.base64) {
+    return undefined
+  }
+  return { base64: result.file.base64, dimensions: result.file.dimensions, type }
+}
+
 export function pathOf(input: unknown): string {
   const path = (input as { file_path?: unknown } | undefined)?.file_path
   return typeof path === 'string' ? path : ''

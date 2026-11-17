@@ -20,6 +20,7 @@ import {
   nativeColumns,
   pack,
   pairOf,
+  otherImageOf,
   pathOf,
   pixels,
   pngOf,
@@ -271,8 +272,9 @@ function Controls(ui: Ui, ...groups: JSX.Element[][]) {
 }
 
 // Opens the Expand pane on this picture; `key` lets it step through the picture's versions
-function ExpandButton($: EngineInterface, ui: Ui, id: string, label: string, base64: string, key?: string) {
+function ExpandButton($: EngineInterface, ui: Ui, id: string, label: string, base64: string, key?: string, size?: Size) {
   const hash = hashOf(base64)
+  const own = size ? { width: size.width, height: size.height } : {}
   return (
     <ui.Button
       key={`${id}-expand`}
@@ -281,7 +283,7 @@ function ExpandButton($: EngineInterface, ui: Ui, id: string, label: string, bas
       dimColor
       onPress={async () => {
         remember(expandedBytes, hash, base64)
-        await update($, expanded, () => (key ? { label, hash, key } : { label, hash }))
+        await update($, expanded, () => (key ? { label, hash, key, ...own } : { label, hash, ...own }))
         await $.ui.open({ id: PANE, title: label })
       }}
     />
@@ -327,7 +329,7 @@ function Panes($: EngineInterface, ui: Ui, id: string, shots: Shot[], box: Box, 
                   <Text bold wrap="truncate-end">{shot.title}</Text>
                   <Box flexDirection="row" gap={1} flexShrink={0}>
                     {hasMeta ? <Text dimColor>{shot.meta}</Text> : null}
-                    {ExpandButton($, ui, `${id}-pane-${slot.index}`, shot.title, shot.base64, shot.key)}
+                    {ExpandButton($, ui, `${id}-pane-${slot.index}`, shot.title, shot.base64, shot.key, shot.size)}
                   </Box>
                 </Box>
                 <Image
@@ -442,7 +444,7 @@ async function drawRead(
       alt={`[image: ${stem}]`}
     />
   )
-  const frame: FrameAt = { title: stem, hint: hintOf(path), meta, width: cells.columns, max: box.columns, actions: [ExpandButton($, ui, requestId, stem, base64, path || undefined)] }
+  const frame: FrameAt = { title: stem, hint: hintOf(path), meta, width: cells.columns, max: box.columns, actions: [ExpandButton($, ui, requestId, stem, base64, path || undefined, size)] }
   if (!hasHistory) {
     return Frame(ui, frame, image)
   }
@@ -664,6 +666,19 @@ async function show($: EngineInterface, id: string, input: ShowInput): Promise<s
   return [shown, ...notes.map(note => `Note: ${note}.`), ...(missing.length > 0 ? [`Could not show: ${missing.join(', ')}`] : [])].join(' ')
 }
 
+// A Read that came back as JPEG or another type: converted to PNG and drawn as a card, since an Image takes PNG bytes
+async function readAsCard($: EngineInterface, id: string, path: string, image: PngFile) {
+  const png = await pngOfBlock($, image.base64, id)
+  if (!png) {
+    return
+  }
+  await record($, path, png)
+  const width = image.dimensions?.originalWidth
+  const height = image.dimensions?.originalHeight
+  const own = width && height ? { width, height } : {}
+  await keepCard($, id, { shots: [{ key: path, label: splitPath(path).stem, hash: hashOf(png), isUnread: false, ...own }] })
+}
+
 // By content, so a card still draws after its version has left the path's history
 async function bytesOf($: EngineInterface, shot: ShowReadImageCardShot) {
   const version = (await kept($))[shot.key]?.versions.find(one => one.hash === shot.hash)
@@ -692,7 +707,8 @@ async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadIm
     return undefined
   }
   if (pictures.length === 1 && card.title === undefined) {
-    return drawRead($, ui, id, only.shot.key, { base64: only.base64 }, columns, false, only.shot.isUnread)
+    const dimensions = only.shot.width && only.shot.height ? { originalWidth: only.shot.width, originalHeight: only.shot.height } : undefined
+    return drawRead($, ui, id, only.shot.key, dimensions ? { base64: only.base64, dimensions } : { base64: only.base64 }, columns, false, only.shot.isUnread)
   }
   const { Box, Button } = ui
   const chosen = await read($, memberOf(pick, { requestId: id }))
@@ -792,6 +808,10 @@ export const register: Register = on => {
       await record($, e.file_path, file.base64).catch(() => undefined)
       await markSeen($, e.file_path, hashOf(file.base64)).catch(() => undefined)
     }
+    const other = ran.deny === undefined && !ran.isError ? otherImageOf('Read', ran.result) : undefined
+    if (other && e.file_path) {
+      void readAsCard($, e.tool_use_id, e.file_path, other).catch(() => undefined)
+    }
     return ran
   }).catch(($, e, next) => (next.called ? { deny: 'show-read-image: the tool call failed under its hook.' } : next(e)))
 
@@ -834,7 +854,9 @@ export const register: Register = on => {
       const bytes = to && shown.key ? await readVersion($, shown.key, to.slot, to.hash) : undefined
       if (to && bytes) {
         remember(expandedBytes, to.hash, bytes)
-        await update($, expanded, () => ({ ...shown, hash: to.hash }))
+        // Another version has its own size, read from its bytes
+        const { width: _width, height: _height, ...rest } = shown
+        await update($, expanded, () => ({ ...rest, hash: to.hash }))
       }
     }
     const stepper =
@@ -850,7 +872,7 @@ export const register: Register = on => {
         <Image key={`pane-${shown.hash.slice(0, 8)}-${cells.columns}x${cells.rows}`} source={{ png: base64 }} columns={cells.columns} rows={cells.rows} alt={`[image: ${shown.label}]`} />
         {Controls(
           ui,
-          [<Text key="pane-label" bold>{shown.label}</Text>, <Text key="pane-size" dimColor>{pixels(size)}</Text>],
+          [<Text key="pane-label" bold>{shown.label}</Text>, <Text key="pane-size" dimColor>{pixels(shown.width && shown.height ? { width: shown.width, height: shown.height } : size)}</Text>],
           ...(stepper.length > 0 ? [stepper] : []),
           [<Button key="pane-close" label="close" dimColor onPress={() => $.ui.close({ id: PANE })} />],
         )}
