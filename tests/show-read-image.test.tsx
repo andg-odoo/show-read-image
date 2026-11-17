@@ -643,7 +643,8 @@ test('a video is summed up by its length, frame count and longest gap between fr
   expect(stripLayout(1920, 1080)).toEqual({ columns: 2, rows: 4, cellHeight: 270 })
   expect(imagePathsIn('Recording saved to /tmp/rec.mov')).toEqual(['/tmp/rec.mov'])
   expect(samplesRow(sampleTimes(5, 8, false))).toBe('frames at 0.0 0.6 1.3 1.9 2.5 3.1 3.8 4.4 s')
-  expect(samplesRow(sampleTimes(600, 8, true))).toBe('frames at 38 113 188 263 338 413 488 563 s')
+  expect(samplesRow(sampleTimes(120, 8, true))).toBe('frames at 7.5 22.5 37.5 52.5 67.5 82.5 97.5 112.5 s')
+  expect(samplesRow(sampleTimes(16, 8, false))).toBe('frames at 0 2 4 6 8 10 12 14 s')
 })
 
 test('show_images draws a video as its filmstrip, with its timing and an open button', async ($, on) => {

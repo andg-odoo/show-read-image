@@ -335,9 +335,10 @@ export function sampleTimes(duration: number, count: number, isSeeking: boolean)
   return Array.from({ length: count }, (_, k) => ((k + (isSeeking ? 0.5 : 0)) * duration) / count)
 }
 
+// Whole seconds where every time is whole, else one decimal: rounding 7.5 to 8 would place a frame half a second late
 export function samplesRow(samples: number[]) {
-  const precise = samples.length > 1 && samples[1]! - samples[0]! < 1
-  return `frames at ${samples.map(t => t.toFixed(precise ? 1 : 0)).join(' ')} s`
+  const isWhole = samples.every(t => Math.abs(t - Math.round(t)) < 0.05)
+  return `frames at ${samples.map(t => t.toFixed(isWhole ? 0 : 1)).join(' ')} s`
 }
 
 // The longest wait between two frames: a screen recording only stores a frame when something changed, so a long
