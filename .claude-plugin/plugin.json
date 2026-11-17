@@ -1,0 +1,12 @@
+{
+  "name": "show-read-image",
+  "version": "0.3.0",
+  "description": "Draw PNGs the Read tool opens inline: framed, side by side per group, before/after pairs and versions",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "andg-odoo",
+    "url": "https://github.com/andg-odoo"
+  },
+  "repository": "https://github.com/andg-odoo/show-read-image",
+  "license": "MIT"
+}
