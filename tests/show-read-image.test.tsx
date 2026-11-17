@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { addVersion, cellFromTmux, cellOf, commandKind, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+import { addVersion, cellFromTmux, cellOf, commandKind, isVideoPath, longestGap, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
 
 // The test runtime has timers; the mod's lib leaves them out
 declare const setTimeout: (done: () => void, ms: number) => unknown
@@ -631,4 +631,66 @@ test('a Read whose PNG is over 2 MiB is converted from the file on disk', async 
   expect((await row.findAll({ type: 'Image' })).map(found => (found.props.source as { png?: string }).png)).toEqual([RED])
   expect(await row.find({ type: 'Text', text: /1206×2622/ })).toBeDefined()
   await row.unmount()
+})
+
+test('a video is summed up by its length, frame count and longest gap between frames', () => {
+  expect(isVideoPath('/t/rec.MOV')).toBe(true)
+  expect(isVideoPath('/t/shot.png')).toBe(false)
+  expect(longestGap([0, 0.5, 2.1, 2.2])).toEqual({ gap: 1.6, gapAt: 2.1 })
+  expect(longestGap([])).toEqual({ gap: 0, gapAt: 0 })
+  expect(videoNote({ duration: 9.6, frames: 159, gap: 1.615, gapAt: 1.61 })).toBe('9.60 s · 159 frames · longest gap 1.61 s at 1.61 s')
+  expect(stripLayout(1206, 2622)).toEqual({ columns: 4, rows: 2, cellHeight: 480 })
+  expect(stripLayout(1920, 1080)).toEqual({ columns: 2, rows: 4, cellHeight: 270 })
+  expect(imagePathsIn('Recording saved to /tmp/rec.mov')).toEqual(['/tmp/rec.mov'])
+})
+
+test('show_images draws a video as its filmstrip, with its timing and an open button', async ($, on) => {
+  const written = new Map<string, string>()
+  const ran: string[][] = []
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  // A Linux machine with ffmpeg: ffprobe gives the shape, the packet times and the length
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    const line = e.argv.join(' ')
+    const stdout = line === 'uname -s'
+      ? 'Linux\n'
+      : line.includes('command -v') ? '/usr/bin/x\n'
+      : line.includes('stream=width,height') ? '1206,2622\n'
+      : line.includes('packet=pts_time') ? '0\n0.5\n2.1\n2.2\n'
+      : line.includes('format=duration') ? '2.5\n'
+      : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/clip.mov' || e.path.endsWith('-strip.png')) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 5, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => (e.path.endsWith('-strip.png') ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const result = await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'vid', images: [{ path: '/s/clip.mov' }] })
+  expect(String(result.result)).toContain('Shown 1 image(s)')
+  expect(ran.some(argv => argv[0] === 'ffmpeg' && argv.join(' ').includes('tile=4x2'))).toBe(true)
+  const card = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'vid',
+    viewport: { columns: 120, rows: 40 },
+    props: { tool_use_id: 'vid', tool: 'mcp__show-read-image__show_images', input: {}, isRunning: false, isErrored: false, isInterrupted: false, output: '' },
+  })
+  expect(await card.find({ type: 'Text', text: /2\.50 s · 4 frames · longest gap 1\.60 s at 2\.10 s/ })).toBeDefined()
+  await card.press({ key: 'vid-open' })
+  expect(ran.some(argv => argv[0] === 'xdg-open' && argv[1] === '/s/clip.mov')).toBe(true)
+  await card.unmount()
 })

@@ -16,6 +16,11 @@ A Claude Code mod that draws images inline in the transcript, under the tool cal
 - **Versions.** Each new content of a path is kept as a version (the last 10), under `~/.cache/show-read-image/`.
   A picture with history has two views: Now, with ◀ ▶ to step back, and Side by side, with the newest six.
 - **Aspect warning.** Shots whose aspect ratios differ by more than 10% get a warning, since they are not comparable.
+- **Videos.** A `.mov`, `.mp4` or `.m4v` shown with `show_images`, or printed by a command, draws as a grid of eight
+  timed frames, captioned with its length, frame count and longest gap between frames. A screen recording only stores
+  a frame when something changed, so a long gap during an animation is a hitch. `open` plays it in the system
+  player. The grid comes from AVFoundation on macOS (a Swift helper compiled on first use) or from ffmpeg and ffprobe
+  elsewhere.
 - **Expand.** ⤢ on any picture opens it in a pane beside the chat, as large as the pane allows, with ◀ ▶ through
   its versions when it has any.
 - **One way to compare.** A card with several images has `[ side by side ] [ A only ] [ B only ]` for two, and

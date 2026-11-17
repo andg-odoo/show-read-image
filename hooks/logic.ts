@@ -247,8 +247,8 @@ export function commandKind(command: string): CommandKind {
   return LISTINGS.test(first) ? 'listing' : 'other'
 }
 
-const PATH_IN_TEXT = /(?:^|[\s"'=(:])(\/[^\s"'()<>]+?\.(?:png|jpe?g))(?=$|[\s"'),;<>])/gi
-const IMAGE_PATH = /^\/.+\.(png|jpe?g)$/i
+const PATH_IN_TEXT = /(?:^|[\s"'=(:])(\/[^\s"'()<>]+?\.(?:png|jpe?g|mov|mp4|m4v))(?=$|[\s"'),;<>])/gi
+const IMAGE_PATH = /^\/.+\.(png|jpe?g|mov|mp4|m4v)$/i
 
 // A JSON result names paths whose keys say what they are; a thumbnail beside a full image is a duplicate
 function jsonPaths(text: string): string[] {
@@ -316,4 +316,41 @@ export function imageBlocks(result: unknown, found: ImageBlock[] = [], depth = 0
 
 export function isPng(base64: string) {
   return base64.startsWith('iVBORw0KGgo')
+}
+
+// Videos
+
+export function isVideoPath(path: string) {
+  return /\.(mov|mp4|m4v)$/i.test(path)
+}
+
+export type VideoStats = { duration: number; frames: number; gap: number; gapAt: number }
+
+// The longest wait between two frames: a screen recording only stores a frame when something changed, so a long
+// gap during an animation is a hitch
+export function longestGap(times: number[]): { gap: number; gapAt: number } {
+  const sorted = [...times].sort((a, b) => a - b)
+  let gap = 0
+  let gapAt = 0
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i]! - sorted[i - 1]! > gap) {
+      gap = sorted[i]! - sorted[i - 1]!
+      gapAt = sorted[i]!
+    }
+  }
+  return { gap, gapAt }
+}
+
+function seconds(n: number) {
+  return `${n < 10 ? n.toFixed(2) : n.toFixed(1)} s`
+}
+
+export function videoNote(stats: VideoStats) {
+  return `${seconds(stats.duration)} · ${stats.frames} frames · longest gap ${seconds(stats.gap)} at ${seconds(stats.gapAt)}`
+}
+
+// Eight frames: four across for a tall video, two across for a wide one
+export function stripLayout(width: number, height: number) {
+  const isTall = height >= width
+  return isTall ? { columns: 4, rows: 2, cellHeight: 480 } : { columns: 2, rows: 4, cellHeight: 270 }
 }

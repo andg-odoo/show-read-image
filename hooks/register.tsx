@@ -17,6 +17,7 @@ import {
   imagePathsIn,
   isPng,
   isPngPath,
+  isVideoPath,
   nativeColumns,
   pack,
   pairOf,
@@ -28,9 +29,10 @@ import {
   sizeOf,
   sizeWarning,
   splitPath,
+  videoNote,
 } from './logic'
 import type { PngFile } from './logic'
-import { toPng, writeBytes } from './platform'
+import { filmstrip, openExternally, toPng, writeBytes } from './platform'
 
 type Ui = Elements['terminal']
 type Box = { columns: number; rows: number }
@@ -253,7 +255,7 @@ function buttonsWidth(labels: string[]) {
 
 // As wide as its widest line, picture, header or controls, so none of them is crushed; pictures keep their own size
 function frameWidth(at: FrameAt) {
-  const header = at.title.length + (at.hint ? at.hint.length + 1 : 0) + 2 + at.meta.length + (at.actions?.length ?? 0) * 2
+  const header = at.title.length + (at.hint ? at.hint.length + 1 : 0) + 2 + at.meta.length + (at.actions?.length ?? 0) * 5
   return Math.min(at.max, Math.max(MIN_FRAME, at.width, header, at.controls ?? 0))
 }
 
@@ -397,6 +399,7 @@ async function drawRead(
   columns: number | undefined,
   isExpanded?: boolean,
   isUnread?: boolean,
+  video?: { note: string; path: string },
 ) {
   const { Box, Button, Image, Text } = ui
   const box = room(columns, isExpanded)
@@ -430,7 +433,7 @@ async function drawRead(
   const size = at === ownAt ? sizeOf(file) : (pngSize(base64) ?? sizeOf(file))
   const cells = fit(size, box.columns, box.rows, cell, nativeColumns(size.width, cellWidth))
   const hasHistory = versions.length > 1
-  const meta = [isUnread ? UNREAD : '', !isKept && saved.length > 0 ? 'older than the kept versions' : '', pixels(size), hasHistory && version.at ? clock(version.at) : '']
+  const meta = [isUnread ? UNREAD : '', !isKept && saved.length > 0 ? 'older than the kept versions' : '', video?.note ?? pixels(size), hasHistory && version.at ? clock(version.at) : '']
     .filter(Boolean)
     .join(' · ')
   const go = (by: number) => () =>
@@ -444,7 +447,10 @@ async function drawRead(
       alt={`[image: ${stem}]`}
     />
   )
-  const frame: FrameAt = { title: stem, hint: hintOf(path), meta, width: cells.columns, max: box.columns, actions: [ExpandButton($, ui, requestId, stem, base64, path || undefined, size)] }
+  const frame: FrameAt = { title: stem, hint: hintOf(path), meta, width: cells.columns, max: box.columns, actions: [
+      ...(video ? [<Button key={`${requestId}-open`} plain dimColor label="open" onPress={() => openExternally($, video.path)} />] : []),
+      ExpandButton($, ui, requestId, stem, base64, path || undefined, size),
+    ] }
   if (!hasHistory) {
     return Frame(ui, frame, image)
   }
@@ -585,6 +591,44 @@ async function pngOfBlock($: EngineInterface, base64: string, id: string): Promi
   }
 }
 
+type Picture = { base64: string; note?: string; isVideo?: true }
+
+const stripNotes = new Map<string, string>()
+
+// A video as a grid of eight timed frames, remade when the video is newer; its timing note is kept per version
+async function stripOf($: EngineInterface, video: string): Promise<Picture | undefined> {
+  const stat = await $.fs.stat(video).catch(() => undefined)
+  if (!stat || stat.kind !== 'file') {
+    return undefined
+  }
+  const dir = await convertedDir($)
+  const out = `${convertedOf(dir, video)}-strip.png`
+  const key = `${video}:${stat.mtimeMs}`
+  if (!stripNotes.has(key)) {
+    const stats = await filmstrip($, video, out, dir)
+    if (!stats) {
+      return undefined
+    }
+    remember(stripNotes, key, videoNote(stats))
+  }
+  const base64 = await pngOfFile($, out)
+  return base64 ? { base64, note: stripNotes.get(key)!, isVideo: true } : undefined
+}
+
+// What a path draws as: a picture, or for a video its filmstrip
+async function pictureOf($: EngineInterface, path: string): Promise<Picture | undefined> {
+  if (isVideoPath(path)) {
+    return stripOf($, path)
+  }
+  const base64 = await pngOfFile($, path)
+  return base64 ? { base64 } : undefined
+}
+
+function shotOf(path: string, picture: Picture, label = splitPath(path).stem): ShowReadImageCardShot {
+  const video = picture.isVideo ? { note: picture.note ?? '', isVideo: true } : {}
+  return { key: path, label, hash: hashOf(picture.base64), isUnread: true, ...video }
+}
+
 // Keeps what a tool call produced as versions under the call's id, so its row can draw them later
 async function collect(
   $: EngineInterface,
@@ -617,10 +661,10 @@ async function collect(
       if (!stat || stat.mtimeMs < startedAt - 1000) {
         continue
       }
-      const base64 = await pngOfFile($, path)
-      if (base64) {
-        await record($, path, base64)
-        shots.push({ key: path, label: splitPath(path).stem, hash: hashOf(base64), isUnread: true })
+      const picture = await pictureOf($, path)
+      if (picture) {
+        await record($, path, picture.base64)
+        shots.push(shotOf(path, picture))
       }
     }
   }
@@ -656,11 +700,12 @@ async function show($: EngineInterface, id: string, input: ShowInput): Promise<s
   const missing: string[] = []
   const notes: string[] = []
   for (const image of input.images.slice(0, MAX_SIDE)) {
-    const base64 = await pngOfFile($, image.path)
-    if (!base64) {
-      missing.push(image.path)
+    const picture = await pictureOf($, image.path)
+    if (!picture) {
+      missing.push(isVideoPath(image.path) ? `${image.path} (needs swiftc on macOS, or ffmpeg and ffprobe)` : image.path)
       continue
     }
+    const base64 = picture.base64
     await record($, image.path, base64)
     const versions = (await kept($))[image.path]?.versions ?? []
     const now = versions.findIndex(one => one.hash === hashOf(base64))
@@ -672,7 +717,7 @@ async function show($: EngineInterface, id: string, input: ShowInput): Promise<s
     if (now < versions.length - 1) {
       notes.push(`${image.path} now matches kept version ${now + 1} of ${versions.length}; versions step back from there`)
     }
-    shots.push({ key: image.path, label: image.label ?? splitPath(image.path).stem, hash: versions[at]?.hash ?? hashOf(base64), isUnread: true })
+    shots.push({ ...shotOf(image.path, picture, image.label), hash: versions[at]?.hash ?? hashOf(base64) })
   }
   if (shots.length > 0) {
     await keepCard($, id, input.title === undefined ? { shots } : { title: input.title, shots })
@@ -724,7 +769,8 @@ async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadIm
   }
   if (pictures.length === 1 && card.title === undefined) {
     const dimensions = only.shot.width && only.shot.height ? { originalWidth: only.shot.width, originalHeight: only.shot.height } : undefined
-    return drawRead($, ui, id, only.shot.key, dimensions ? { base64: only.base64, dimensions } : { base64: only.base64 }, columns, false, only.shot.isUnread)
+    const video = only.shot.isVideo ? { note: only.shot.note ?? 'video', path: only.shot.key } : undefined
+    return drawRead($, ui, id, only.shot.key, dimensions ? { base64: only.base64, dimensions } : { base64: only.base64 }, columns, false, only.shot.isUnread, video)
   }
   const { Box, Button } = ui
   const chosen = await read($, memberOf(pick, { requestId: id }))
@@ -742,7 +788,8 @@ async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadIm
           ...pictures.map((one, i) => (isPair ? chip(i, `${one.shot.label} only`) : i === 0 ? null : chip(i, `vs ${one.shot.label}`))),
         ].filter(one => one !== null)
   const shown = at < 0 ? pictures : isPair ? [pictures[at]!] : [pictures[0]!, pictures[at]!]
-  const panes = Panes($, ui, `${id}-card`, shown.map(one => shot(one.shot.label, diskPic(one.base64))), wide(columns), 6, isPair || at >= 0 ? 2 : 3)
+  const tile = (one: (typeof pictures)[number]) => ({ ...shot(one.shot.label, diskPic(one.base64)), ...(one.shot.isVideo ? { meta: 'video' } : {}) })
+  const panes = Panes($, ui, `${id}-card`, shown.map(tile), wide(columns), 6, isPair || at >= 0 ? 2 : 3)
   const meta = [pictures.some(one => one.shot.isUnread) ? UNREAD : '', pictures.length > 1 ? `${pictures.length} images` : pixels(diskPic(only.base64).size)]
     .filter(Boolean)
     .join(' · ')
