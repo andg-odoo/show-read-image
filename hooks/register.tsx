@@ -693,7 +693,12 @@ async function stripOf($: EngineInterface, video: string): Promise<Picture | und
 // What a path draws as: a picture, or for a video its filmstrip; else why it can't be drawn
 async function pictureOf($: EngineInterface, path: string): Promise<Picture | { reason: string }> {
   if (isVideoPath(path)) {
-    const reason = needsFfmpeg(path) && !(await hasFfmpeg($)) ? 'WebM needs ffmpeg and ffprobe' : 'no filmstrip: needs swiftc on macOS, or ffmpeg and ffprobe'
+    // With the tools there, a failure is the file's: unreadable, or no frames to show
+    const reason = needsFfmpeg(path) && !(await hasFfmpeg($))
+      ? 'WebM needs ffmpeg and ffprobe'
+      : (await hasFfmpeg($))
+        ? "the video couldn't be read: no frames or length found"
+        : 'no filmstrip: needs swiftc on macOS, or ffmpeg and ffprobe'
     return (await stripOf($, path)) ?? { reason }
   }
   return convertFile($, path)

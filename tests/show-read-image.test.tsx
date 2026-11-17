@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { addVersion, cellFromTmux, cellOf, clockOf, commandKind, needsFfmpeg, parseFrameLine, playWord, playerBox, scrubChunks, isVideoPath, longestGap, sampleTimes, samplesRow, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+import { addVersion, cellFromTmux, cellOf, clipLength, clockOf, commandKind, needsFfmpeg, parseFrameLine, playWord, playerBox, scrubChunks, isVideoPath, longestGap, sampleTimes, samplesRow, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
 
 // The test runtime has timers; the mod's lib leaves them out
 declare const setTimeout: (done: () => void, ms: number) => unknown
@@ -643,6 +643,10 @@ test('a video is summed up by its length, frame count and longest gap between fr
   expect(isVideoPath('/t/test-results/video.webm')).toBe(true)
   expect(needsFfmpeg('/t/video.webm')).toBe(true)
   expect(needsFfmpeg('/t/rec.mov')).toBe(false)
+  // A streamed recording with no container length runs to its last frame plus one
+  expect(Math.round(clipLength(0, [0, 0.04, 0.08, 47.315]) * 1000)).toBe(Math.round((47.315 + 47.315 / 3) * 1000))
+  expect(clipLength(12.5, [0, 1])).toBe(12.5)
+  expect(clipLength(0, [])).toBe(0)
   expect(imagePathsIn('video saved: /t/test-results/login/video.webm')).toEqual(['/t/test-results/login/video.webm'])
   expect(longestGap([0, 0.5, 2.1, 2.2])).toEqual({ gap: 1.6, gapAt: 2.1 })
   expect(longestGap([])).toEqual({ gap: 0, gapAt: 0 })
@@ -721,7 +725,7 @@ test('a video over a minute is sampled by seeking to each frame, not decoded who
       ? 'Linux\n'
       : line.includes('command -v') ? '/usr/bin/x\n'
       : line.includes('stream=width,height') ? '1920,1080\n'
-      : line.includes('packet=pts_time') ? '0\n1\n2\n'
+      : line.includes('packet=pts_time') ? '0\n300\n599.96\n'
       : line.includes('format=duration') ? '600\n'
       : ''
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -1092,4 +1096,43 @@ test('a WebM goes to ffmpeg even on a Mac, since AVFoundation can\'t decode it',
   expect(String(result.result)).toContain('Shown 1 image(s)')
   expect(ran.some(argv => argv[0] === 'ffmpeg' && argv.includes('/s/video.webm'))).toBe(true)
   expect(ran.some(argv => argv[0]!.endsWith('/filmstrip'))).toBe(false)
+})
+
+test('a WebM with no container length still gets a grid, its seeks kept before the last frame', async ($, on) => {
+  const written = new Map<string, string>()
+  const ran: string[][] = []
+  // 818 frames 1/30 s apart from 0 to 27.233 s, as a streaming recorder writes them, and no length
+  const packets = Array.from({ length: 818 }, (_, i) => (i / 30).toFixed(3)).join('\n') + '\n'
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    const line = e.argv.join(' ')
+    const stdout = line === 'uname -s'
+      ? 'Linux\n'
+      : line.includes('command -v') ? '/usr/bin/x\n'
+      : line.includes('stream=width,height') ? '2560,1359\n'
+      : line.includes('packet=pts_time') ? packets
+      : line.includes('format=duration') ? 'N/A\n'
+      : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.exists', () => ({ value: true }))
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/streamed.webm' || e.path.endsWith('-strip.png')) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 9, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => (e.path.endsWith('-strip.png') ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
+  const result = await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'streamed', images: [{ path: '/s/streamed.webm' }] })
+  expect(String(result.result)).toContain('Shown 1 image(s)')
+  // 27.27 s is under a minute, so the grid comes from the fps filter over that length
+  const grid = ran.find(argv => argv[0] === 'ffmpeg' && argv.join(' ').includes('tile='))
+  expect(grid?.join(' ')).toMatch(/fps=0\.29\d+/)
 })
