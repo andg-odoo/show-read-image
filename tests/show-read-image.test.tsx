@@ -116,6 +116,9 @@ test('a read PNG is kept once per content and stepped through', async ($, on) =>
   await ui.press({ key: 'prev' })
   expect(await ui.find({ type: 'Text', text: /v1\/2/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /older version/ })).toBeDefined()
+  // The frame fits its controls, `[ now ] [ side by side ]   ◀ v1/2 ▶   older version, …`, not just the 8×4 picture
+  const frame = (await ui.findAll({ type: 'Box' })).find(found => found.props.borderStyle === 'round')
+  expect(Number(frame?.props.width)).toBeGreaterThanOrEqual(24 + 3 + 8 + 3 + 'older version, read here was v2'.length + 4)
   await ui.press({ key: 'view-side' })
   expect(await ui.findAll({ type: 'Image' })).toHaveLength(2)
   expect(await ui.find({ type: 'Text', text: 'Now' })).toBeDefined()
@@ -418,4 +421,44 @@ test('a tool card still draws after its path has kept ten newer versions, and Gl
   const glob = await mount('glob-1', 'Glob')
   expect(await glob.findAll({ type: 'Image' })).toHaveLength(0)
   await glob.unmount()
+})
+
+test('a command that made the pair a group then reads draws it once', async ($, on) => {
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  const disk = new Map([['/s/btn.before.png', RED], ['/s/btn.after.png', BLUE]])
+  on('fs.write', () => ({ value: undefined }))
+  on('fs.stat', (_, e) => {
+    if (!disk.has(e.path)) {
+      throw new Error('ENOENT')
+    }
+    return { value: { kind: 'file' as const, size: 90, mtimeMs: Date.UTC(2026, 10, 17, 12), isLink: false } }
+  })
+  on('fs.read', (_, e) => ({ value: { base64: disk.get(e.path) ?? '' } }))
+  on('tool.call', () => ({ result: 'ok', text: '' }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine line</Text>
+  })
+  await $.tool.call({ tool: 'Bash', command: 'convert -size 8x4 xc:red /s/btn.before.png && convert -size 8x4 xc:blue /s/btn.after.png', tool_use_id: 'make' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  const group = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'ToolGroup',
+    viewport: { columns: 120, rows: 40 },
+    props: {
+      calls: [
+        { tool_use_id: 'make', tool: 'Bash', input: { command: 'convert …' }, isRunning: false, isErrored: false, isInterrupted: false, output: 'ok' },
+        call('a', '/s/btn.before.png', RED),
+        call('b', '/s/btn.after.png', BLUE),
+      ],
+      isActive: false,
+      isExpanded: false,
+    },
+  })
+  expect(await group.find({ type: 'Text', text: 'before | after' })).toBeDefined()
+  expect(await group.findAll({ type: 'Image' })).toHaveLength(2)
+  await group.unmount()
 })

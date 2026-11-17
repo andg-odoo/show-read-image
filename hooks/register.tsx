@@ -236,11 +236,38 @@ function hintOf(path: string) {
   return dir ? `${splitPath(dir).name}/` : ''
 }
 
+type FrameAt = { title: string; hint?: string; meta: string; width: number; controls?: number; max: number }
+
+// Bracketed buttons draw as `[ label ]`, one column apart
+function buttonsWidth(labels: string[]) {
+  return labels.reduce((sum, label) => sum + label.length + 4, 0) + Math.max(0, labels.length - 1)
+}
+
+// As wide as its widest line, picture, header or controls, so none of them is crushed; pictures keep their own size
+function frameWidth(at: FrameAt) {
+  const header = at.title.length + (at.hint ? at.hint.length + 1 : 0) + 2 + at.meta.length
+  return Math.min(at.max, Math.max(MIN_FRAME, at.width, header, at.controls ?? 0))
+}
+
+// Control groups wrap as wholes, so `◀ v3/3 ▶` or a button never breaks apart
+function Controls(ui: Ui, ...groups: JSX.Element[][]) {
+  const { Box } = ui
+  return (
+    <Box flexDirection="row" flexWrap="wrap" columnGap={3}>
+      {groups.map((group, i) => (
+        <Box key={`controls-${i}`} flexDirection="row" gap={1} flexShrink={0}>
+          {group}
+        </Box>
+      ))}
+    </Box>
+  )
+}
+
 // The rounded dim border with its title bar: bold title, dim folder hint, dim meta on the right
-function Frame(ui: Ui, at: { title: string; hint?: string; meta: string; width: number }, ...body: JSX.Element[]) {
+function Frame(ui: Ui, at: FrameAt, ...body: JSX.Element[]) {
   const { Box, Text } = ui
   return (
-    <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1} width={Math.max(MIN_FRAME, at.width) + 4}>
+    <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1} width={frameWidth(at) + 4}>
       <Box flexDirection="row" justifyContent="space-between" gap={2}>
         <Box flexDirection="row" gap={1} flexShrink={1}>
           <Text bold wrap="truncate-end">{at.title}</Text>
@@ -308,11 +335,12 @@ async function drawPair($: EngineInterface, ui: Ui, requestId: string, pair: Pai
     ...(shown !== 'after' ? [shot('Before', pair.before)] : []),
     ...(shown !== 'before' ? [shot('After', pair.after)] : []),
   ]
-  const panes = Panes(ui, pair.stem, sides, box, 1, 2)
+  // Keyed by the drawing's own id: a group can hold this pair twice, from a Read and from the command that made it
+  const panes = Panes(ui, `${requestId}-${pair.stem}`, sides, box, 1, 2)
   const meta = ['before | after', sizeWarning(pair.before.size, pair.after.size)].filter(Boolean).join(' · ')
-  const controls = (
-    <Box flexDirection="row" gap={1}>
-      {MODES.map(one => (
+  const controls = Controls(
+    ui,
+    MODES.map(one => (
         <Button
           key={`mode-${one.mode}-${pair.stem}`}
           label={one.label}
@@ -320,10 +348,10 @@ async function drawPair($: EngineInterface, ui: Ui, requestId: string, pair: Pai
           dimColor={one.mode !== shown}
           onPress={() => update($, memberOf(mode, { requestId }), () => one.mode)}
         />
-      ))}
-    </Box>
+      )),
   )
-  return Frame(ui, { title: pair.stem, hint: pair.hint, meta, width: panes.width }, controls, panes.tree)
+  const at = { title: pair.stem, hint: pair.hint, meta, width: panes.width, controls: buttonsWidth(MODES.map(one => one.label)), max: box.columns }
+  return Frame(ui, at, controls, panes.tree)
 }
 
 // A lone PNG read: its pair when the before file is on disk, else the picture and its versions
@@ -383,7 +411,7 @@ async function drawRead(
       alt={`[image: ${stem}]`}
     />
   )
-  const frame = { title: stem, hint: hintOf(path), meta, width: cells.columns }
+  const frame: FrameAt = { title: stem, hint: hintOf(path), meta, width: cells.columns, max: box.columns }
   if (!hasHistory) {
     return Frame(ui, frame, image)
   }
@@ -413,24 +441,26 @@ async function drawRead(
     const note = first > 0 ? <Text dimColor>{`${first} older version(s) not shown`}</Text> : null
     return Frame(
       ui,
-      { title: stem, hint: hintOf(path), meta: `${versions.length} versions`, width: panes.width },
-      <Box flexDirection="row" gap={1}>{chips}</Box>,
+      { title: stem, hint: hintOf(path), meta: `${versions.length} versions`, width: panes.width, controls: buttonsWidth(['now', 'side by side']), max: wide(columns).columns },
+      Controls(ui, chips),
       ...(note ? [note] : []),
       panes.tree,
     )
   }
-  const controls = (
-    <Box flexDirection="row" gap={3}>
-      <Box flexDirection="row" gap={1}>{chips}</Box>
-      <Box flexDirection="row" gap={1}>
-        <Button key="prev" plain label="◀" dimColor={at === 0} onPress={go(-1)} />
-        <Text>{`v${at + 1}/${versions.length}`}</Text>
-        <Button key="next" plain label="▶" dimColor={at === versions.length - 1} onPress={go(1)} />
-      </Box>
-      <Text dimColor>{at === ownAt ? 'as read here' : `older version, read here was v${ownAt + 1}`}</Text>
-    </Box>
+  const position = `v${at + 1}/${versions.length}`
+  const note = at === ownAt ? 'as read here' : `older version, read here was v${ownAt + 1}`
+  const controls = Controls(
+    ui,
+    chips,
+    [
+      <Button key="prev" plain label="◀" dimColor={at === 0} onPress={go(-1)} />,
+      <Text key="position">{position}</Text>,
+      <Button key="next" plain label="▶" dimColor={at === versions.length - 1} onPress={go(1)} />,
+    ],
+    [<Text key="note" dimColor>{note}</Text>],
   )
-  return Frame(ui, frame, controls, image)
+  const width = buttonsWidth(['now', 'side by side']) + 3 + position.length + 4 + 3 + note.length
+  return Frame(ui, { ...frame, controls: width }, controls, image)
 }
 
 // A group's before/after pairs, an after read pairing with its before on disk, and the rest
@@ -636,8 +666,10 @@ async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadIm
   const meta = [pictures.some(one => one.shot.isUnread) ? UNREAD : '', pictures.length > 1 ? `${pictures.length} images` : pixels(diskPic(only.base64).size)]
     .filter(Boolean)
     .join(' · ')
-  const controls = chips.length > 0 ? [<Box flexDirection="row" gap={1}>{chips}</Box>] : []
-  return Frame(ui, { title: card.title ?? only.shot.label, meta, width: panes.width }, ...controls, panes.tree)
+  const labels = pictures.length < 2 ? [] : isPair ? ['side by side', ...pictures.map(one => `${one.shot.label} only`)] : ['all', ...pictures.slice(1).map(one => `vs ${one.shot.label}`)]
+  const controls = chips.length > 0 ? [Controls(ui, chips)] : []
+  const frame: FrameAt = { title: card.title ?? only.shot.label, meta, width: panes.width, controls: buttonsWidth(labels), max: wide(columns).columns }
+  return Frame(ui, frame, ...controls, panes.tree)
 }
 
 async function cardsIn($: EngineInterface, calls: ReadonlyArray<ToolGroupCall>) {
@@ -777,9 +809,14 @@ export const register: Register = on => {
       const panes = Panes(ui, 'gallery', shots, wide(columns), 6, 2)
       const hints = [...new Set(rest.map(one => hintOf(one.path)))]
       const at = { title: `${shots.length} images`, hint: hints.length === 1 ? hints[0] : undefined, meta: `${rest.length} reads` }
-      trees.push(Frame(ui, { ...at, width: panes.width }, panes.tree))
+      trees.push(Frame(ui, { ...at, width: panes.width, max: wide(columns).columns }, panes.tree))
     }
+    // A command that made the files the group then read adds nothing the reads don't already show
+    const readPaths = new Set(reads.flatMap(one => [one.path, pairOf(one.path)?.before ?? '', pairOf(one.path)?.after ?? '']))
     for (const [id, card] of toolCards) {
+      if (card.shots.every(one => readPaths.has(one.key))) {
+        continue
+      }
       const tree = await drawCard($, ui, id, card, columns)
       if (tree) {
         trees.push(tree)
