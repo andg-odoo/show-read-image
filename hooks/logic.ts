@@ -393,3 +393,28 @@ export function playerBox(columns: number, rows: number, cellWidth: number, cell
   const cellHeight = cellWidth * cell
   return { width: Math.max(64, Math.round(columns * cellWidth)), height: Math.max(64, Math.round((rows - controlRows) * cellHeight)) }
 }
+
+// The player's word for where the clip is
+export function playWord(state: 'playing' | 'paused' | 'ended' | 'idle', position: number) {
+  if (state === 'playing') {
+    return '❚❚ Pause'
+  }
+  if (state === 'ended') {
+    return '↺ Replay'
+  }
+  return state === 'paused' && position > 0 ? '▶ Resume' : '▶ Play'
+}
+
+// A scrub bar of `segments` cells in about `count` pressable stretches: played '━', the playhead '●', the rest '─'
+export function scrubChunks(segments: number, playhead: number, count = 20) {
+  const size = Math.max(1, Math.ceil(segments / count))
+  const chunks: { start: number; label: string; isAhead: boolean }[] = []
+  for (let start = 0; start < segments; start += size) {
+    let label = ''
+    for (let i = start; i < Math.min(segments, start + size); i++) {
+      label += i === playhead ? '●' : i < playhead ? '━' : '─'
+    }
+    chunks.push({ start, label, isAhead: start > playhead })
+  }
+  return chunks
+}

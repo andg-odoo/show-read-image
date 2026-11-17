@@ -1,7 +1,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register, ToolGroupCall, UiPressArgument } from 'claude-code'
 
-import type { ShowReadImageCard, ShowReadImageCardShot, ShowReadImageExpanded, ShowReadImageHistory, ShowReadImageMode, ShowReadImageView } from '../types'
+import type { ShowReadImageCard, ShowReadImageCardShot, ShowReadImageChapter, ShowReadImageExpanded, ShowReadImageHistory, ShowReadImageMode, ShowReadImageView } from '../types'
 import {
   COMPACT,
   EXPANDED,
@@ -29,7 +29,10 @@ import {
   pngSize,
   sizeOf,
   sizeWarning,
+  clockOf,
+  playWord,
   samplesRow,
+  scrubChunks,
   splitPath,
   videoNote,
 } from './logic'
@@ -429,7 +432,7 @@ async function drawRead(
   columns: number | undefined,
   isExpanded?: boolean,
   isUnread?: boolean,
-  video?: { note: string; path: string; samples?: string },
+  video?: VideoAt,
 ) {
   const { Image, Text } = ui
   const box = room(columns, isExpanded)
@@ -442,6 +445,9 @@ async function drawRead(
     }
   }
   const stem = path ? splitPath(path).stem : 'image'
+  if (video?.site) {
+    return drawVideo($, ui, requestId, video, file, stem, hintOf(path), isUnread === true, columns)
+  }
   const own = hashFor(requestId, file.base64)
   const saved = (await kept($))[path]?.versions ?? []
   // A row older than the kept history draws alone rather than posing as the newest version
@@ -658,9 +664,9 @@ async function pngOfBlock($: EngineInterface, base64: string, id: string): Promi
   }
 }
 
-type Picture = { base64: string; note?: string; samples?: string; isVideo?: true }
+type Picture = { base64: string; note?: string; samples?: string; duration?: number; isVideo?: true }
 
-const stripNotes = new Map<string, { note: string; samples?: string }>()
+const stripNotes = new Map<string, { note: string; samples?: string; duration: number }>()
 
 // A video as a grid of eight timed frames, remade when the video is newer; its timing note is kept per version
 async function stripOf($: EngineInterface, video: string): Promise<Picture | undefined> {
@@ -676,7 +682,8 @@ async function stripOf($: EngineInterface, video: string): Promise<Picture | und
     if (!stats) {
       return undefined
     }
-    remember(stripNotes, key, stats.samples ? { note: videoNote(stats), samples: samplesRow(stats.samples) } : { note: videoNote(stats) })
+    const note = { note: videoNote(stats), duration: stats.duration }
+    remember(stripNotes, key, stats.samples ? { ...note, samples: samplesRow(stats.samples) } : note)
   }
   const base64 = await pngOfFile($, out)
   return base64 ? { base64, ...stripNotes.get(key)!, isVideo: true } : undefined
@@ -693,7 +700,14 @@ async function pictureOf($: EngineInterface, path: string): Promise<Picture | { 
 const failure = (path: string, reason: string) => `${splitPath(path).name}: ${reason}`
 
 function shotOf(path: string, picture: Picture, label = splitPath(path).stem): ShowReadImageCardShot {
-  const video = picture.isVideo ? { note: picture.note ?? '', ...(picture.samples ? { samples: picture.samples } : {}), isVideo: true } : {}
+  const video = picture.isVideo
+    ? {
+        note: picture.note ?? '',
+        ...(picture.samples ? { samples: picture.samples } : {}),
+        ...(picture.duration ? { duration: picture.duration } : {}),
+        isVideo: true,
+      }
+    : {}
   return { key: path, label, hash: hashOf(picture.base64), isUnread: true, ...video }
 }
 
@@ -763,7 +777,7 @@ async function keepCard($: EngineInterface, id: string, card: ShowReadImageCard)
   await $.store.set('cards', all)
 }
 
-type ShowInput = { images: { path: string; label?: string; version?: number }[]; title?: string }
+type ShowInput = { images: { path: string; label?: string; version?: number; chapters?: ShowReadImageChapter[] }[]; title?: string }
 
 // The show_images tool: each path as it is now, or `version` steps back through what was kept of it
 async function show($: EngineInterface, id: string, input: ShowInput): Promise<string> {
@@ -790,7 +804,8 @@ async function show($: EngineInterface, id: string, input: ShowInput): Promise<s
     if (now < versions.length - 1) {
       notes.push(`${image.path} now matches kept version ${now + 1} of ${versions.length}; versions step back from there`)
     }
-    shots.push({ ...shotOf(image.path, picture, image.label), hash: versions[at]?.hash ?? hashOf(base64) })
+    const chapters = picture.isVideo && image.chapters ? chaptersOf(image.chapters, picture.duration) : []
+    shots.push({ ...shotOf(image.path, picture, image.label), hash: versions[at]?.hash ?? hashOf(base64), ...(chapters.length > 0 ? { chapters } : {}) })
   }
   if (shots.length > 0 || failed.length > 0) {
     const card: ShowReadImageCard = { shots, ...(input.title === undefined ? {} : { title: input.title }), ...(failed.length > 0 ? { failed } : {}) }
@@ -798,6 +813,15 @@ async function show($: EngineInterface, id: string, input: ShowInput): Promise<s
   }
   const shown = `Shown ${shots.length} image(s) to the user, marked as not read by you.`
   return [shown, ...notes.map(note => `Note: ${note}.`), ...(missing.length > 0 ? [`Could not show: ${missing.join(', ')}`] : [])].join(' ')
+}
+
+// Chapters as given, in order, within the clip, and few enough to list beside it
+function chaptersOf(chapters: ShowReadImageChapter[], duration = Infinity) {
+  return chapters
+    .filter(one => typeof one?.label === 'string' && Number.isFinite(one.at) && one.at >= 0 && one.at <= duration)
+    .map(one => ({ label: one.label.slice(0, 48), at: one.at }))
+    .sort((a, b) => a.at - b.at)
+    .slice(0, 12)
 }
 
 // A Read that came back as JPEG or another type: converted to PNG and drawn as a card, since an Image takes PNG bytes
@@ -824,8 +848,8 @@ async function bytesOf($: EngineInterface, shot: ShowReadImageCardShot) {
 
 // One picture draws as a read does, with its versions; several share a frame
 // A card's pictures, with a dim line under them for each one that couldn't be drawn
-async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadImageCard, columns: number | undefined) {
-  const drawn = await drawPictures($, ui, id, card, columns)
+async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadImageCard, columns: number | undefined, site = id) {
+  const drawn = await drawPictures($, ui, id, card, columns, site)
   const failures = (card.failed ?? []).map((line, i) => <ui.Text key={`${id}-failed-${i}`} dimColor>{`  ⚠ ${line}`}</ui.Text>)
   if (failures.length === 0) {
     return drawn
@@ -838,7 +862,7 @@ async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadIm
   )
 }
 
-async function drawPictures($: EngineInterface, ui: Ui, id: string, card: ShowReadImageCard, columns: number | undefined) {
+async function drawPictures($: EngineInterface, ui: Ui, id: string, card: ShowReadImageCard, columns: number | undefined, site: string) {
   if (card.isCommand) {
     const shown = await read($, seen)
     const later = (shot: ShowReadImageCardShot) => (shown[`${shot.key}#${shot.hash}`] ?? -Infinity) >= (card.at ?? Infinity)
@@ -858,10 +882,19 @@ async function drawPictures($: EngineInterface, ui: Ui, id: string, card: ShowRe
   if (!only) {
     return undefined
   }
-  if (pictures.length === 1 && card.title === undefined) {
+  // A lone video always gets its player; a lone picture is drawn as a read is unless the card has a title
+  if (pictures.length === 1 && (card.title === undefined || only.shot.isVideo)) {
     const dimensions = only.shot.width && only.shot.height ? { originalWidth: only.shot.width, originalHeight: only.shot.height } : undefined
     const video = only.shot.isVideo
-      ? { note: only.shot.note ?? 'video', path: only.shot.key, ...(only.shot.samples ? { samples: only.shot.samples } : {}) }
+      ? {
+          note: only.shot.note ?? 'video',
+          path: only.shot.key,
+          site,
+          ...(only.shot.samples ? { samples: only.shot.samples } : {}),
+          ...(only.shot.duration ? { duration: only.shot.duration } : {}),
+          ...(only.shot.chapters ? { chapters: only.shot.chapters } : {}),
+          ...(card.title ? { title: card.title } : {}),
+        }
       : undefined
     return drawRead($, ui, id, only.shot.key, dimensions ? { base64: only.base64, dimensions } : { base64: only.base64 }, columns, false, only.shot.isUnread, video)
   }
@@ -903,6 +936,116 @@ async function cardsIn($: EngineInterface, calls: ReadonlyArray<ToolGroupCall>) 
   })
 }
 
+// A video card's own facts: its caption, file, the site it draws in, and what the card shows beside it
+type VideoAt = { note: string; path: string; site?: string; samples?: string; duration?: number; chapters?: ShowReadImageChapter[]; title?: string }
+
+// Plays `video` into `site` from `from` seconds, decoding at `size` pixels; says so when this machine can't
+async function startVideo($: EngineInterface, site: string, video: string, from: number, size: { width: number; height: number }) {
+  const source = await playbackSource($, video, size, from, PLAYER_FPS, await convertedDir($))
+  if (!source) {
+    await $.ui.toast('show-read-image: playing a video needs clang on macOS, or ffmpeg')
+    return
+  }
+  play($, site, video, from, size, source)
+}
+
+// ▶ Play  0:04 ━━━━━━●──────── 0:14: the word follows the clip's state; each stretch of the bar jumps there
+function ScrubBar(ui: Ui, $: EngineInterface, prefix: string, p: ReturnType<typeof currentPlayback>, duration: number, width: number, start: (from: number) => unknown) {
+  const { Box, Button, Text } = ui
+  const position = p?.position ?? 0
+  const state = !p ? 'idle' : p.status === 'playing' || p.status === 'starting' ? 'playing' : p.status === 'ended' ? 'ended' : 'paused'
+  const word = playWord(state, position)
+  const elapsed = clockOf(Math.min(position, duration), true)
+  const total = clockOf(duration, true)
+  const segments = Math.max(6, width - word.length - elapsed.length - total.length - 6)
+  const playhead = duration > 0 ? Math.min(segments - 1, Math.round((position / duration) * (segments - 1))) : 0
+  const toggle = () => {
+    if (state === 'playing') {
+      pausePlayback($)
+    } else {
+      void start(state === 'ended' ? 0 : position)
+    }
+  }
+  return (
+    <Box key={`${prefix}-bar`} flexDirection="row" flexWrap="nowrap">
+      <Button key={state === 'playing' ? `${prefix}-pause` : `${prefix}-play`} plain label={word} onPress={toggle} />
+      <Text dimColor>{` ${elapsed} `}</Text>
+      {scrubChunks(segments, playhead).map((chunk, i) => (
+        <Button
+          key={`${prefix}-seek-${i}`}
+          plain
+          dimColor={chunk.isAhead}
+          label={chunk.label}
+          onPress={() => void start(duration > 0 ? (chunk.start / Math.max(1, segments - 1)) * duration : 0)}
+        />
+      ))}
+      <Text dimColor>{` ${total}`}</Text>
+    </Box>
+  )
+}
+
+// What changed and when: each a link that plays the clip from there
+function Chapters(ui: Ui, prefix: string, chapters: ShowReadImageChapter[], start: (from: number) => unknown) {
+  const { Box, Text } = ui
+  return (
+    <Box key={`${prefix}-chapters`} flexDirection="column" width={chaptersWidth(chapters)} flexShrink={0}>
+      <Text dimColor>Chapters</Text>
+      {chapters.map((one, i) => (
+        <Box key={`${prefix}-chapter-${i}`} flexDirection="row" justifyContent="space-between" gap={2}>
+          <Text wrap="truncate-end">{`${i + 1}. ${one.label}`}</Text>
+          {Link(ui, `${prefix}-chapter-${i}-at`, clockOf(one.at, true), () => start(one.at))}
+        </Box>
+      ))}
+    </Box>
+  )
+}
+
+function chaptersWidth(chapters: ShowReadImageChapter[]) {
+  return Math.min(44, Math.max(...chapters.map((one, i) => `${i + 1}. ${one.label}`.length + 2 + clockOf(one.at, true).length)))
+}
+
+// A video's card: its frames at rest, the clip itself once played here, with the scrub bar and any chapters
+async function drawVideo($: EngineInterface, ui: Ui, requestId: string, video: VideoAt, file: PngFile, stem: string, hint: string, isUnread: boolean, columns: number | undefined) {
+  const { Box, Image, Text } = ui
+  const site = video.site ?? requestId
+  const playing = currentPlayback()
+  const p = playing?.video === video.path && playing.site === site ? playing : undefined
+  const chapters = video.chapters ?? []
+  const side = chapters.length > 0 ? chaptersWidth(chapters) + 3 : 0
+  const box = room(columns)
+  const media = { columns: Math.max(20, box.columns - side), rows: box.rows }
+  const decode = playerBox(media.columns, media.rows + 3, cellWidth, cell, 3)
+  const start = (from: number) => startVideo($, site, video.path, from, decode)
+  const frame = p ? (p.first ?? p.last) : undefined
+  const picture = frame ?? file.base64
+  const size = pngSize(picture) ?? sizeOf(file)
+  const cells = fit(size, media.columns, media.rows, cell, frame ? Infinity : nativeColumns(size.width, cellWidth))
+  const shown = frame
+    ? <Image key={playerKey(cells.columns, cells.rows)} source={{ png: frame }} columns={cells.columns} rows={cells.rows} alt={`[video: ${stem}]`} />
+    : <Image key={`strip-${cells.columns}x${cells.rows}-${fingerprint(file.base64).slice(0, 8)}`} source={{ png: file.base64 }} columns={cells.columns} rows={cells.rows} alt={`[video: ${stem}]`} />
+  const duration = video.duration ?? 0
+  const bar = p && duration > 0 ? [ScrubBar(ui, $, site, p, duration, cells.columns, start)] : []
+  const samples = !p && video.samples ? [<Text key={`${requestId}-samples`} dimColor>{video.samples}</Text>] : []
+  const body = (
+    <Box key={`${requestId}-video`} flexDirection="row" gap={3}>
+      <Box flexDirection="column">
+        {shown}
+        {bar}
+        {samples}
+      </Box>
+      {chapters.length > 0 ? Chapters(ui, site, chapters, start) : null}
+    </Box>
+  )
+  const actions = pictureActions($, ui, requestId, stem, file.base64, video.path, size, video.path)
+  // At rest the card offers to play; once played, Frames goes back to the grid
+  const left = p
+    ? [Choice(ui, `${site}-video`, 'Video', true, () => undefined), Link(ui, `${site}-frames`, 'Frames', () => stopPlayback($))]
+    : [<ui.Button key={`${site}-play`} plain label="▶ Play" onPress={() => void start(0)} />]
+  const footer = { left, right: actions.elements, width: labelsWidth(p ? ['Video', 'Frames'] : ['▶ Play']) + 3 + actions.width }
+  const frameAt: FrameAt = { title: video.title ?? stem, hint, meta: video.note, width: cells.columns + side, max: box.columns, isUnread, footer }
+  return Frame(ui, frameAt, body)
+}
+
 let resizeTimer: { cancel: () => void } | undefined
 let paneSize = ''
 
@@ -920,19 +1063,12 @@ let wantedBox: { width: number; height: number } | undefined
 async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: number, video: string, label: string, strip: string) {
   const { Box, Button, Image, Text } = ui
   const playing = currentPlayback()
-  const p = playing?.video === video ? playing : undefined
+  const p = playing?.video === video && playing.site === PANE ? playing : undefined
   if (playing && !p) {
     stopPlayback($)
   }
   const box = playerBox(columns, rows, cellWidth, cell, 3)
-  const start = async (from: number, size = box) => {
-    const source = await playbackSource($, video, size, from, PLAYER_FPS, await convertedDir($))
-    if (!source) {
-      await $.ui.toast('show-read-image: playing a video needs clang on macOS, or ffmpeg')
-      return
-    }
-    play($, PANE, video, from, size, source)
-  }
+  const start = (from: number, size = box) => startVideo($, PANE, video, from, size)
   // A resized pane decodes at its new size, from where it was, once the size has held for a moment: dragging the
   // pane's edge redraws many times, and restarting on each would decode a burst of short runs
   if (p?.status === 'playing' && p.box && (Math.abs(p.box.width - box.width) > 40 || Math.abs(p.box.height - box.height) > 40)) {
@@ -995,10 +1131,11 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'show_images',
       description:
-        'Show image files to the user under this call, without loading them into your context. The card says the images were not read by you, ' +
+        'Show image or video files to the user under this call, without loading them into your context. The card says they were not read by you, ' +
         'so Read an image instead when you need to see it yourself or make claims about it. One image draws on its own; several share one frame, ' +
-        'side by side, in the order given. Each item: path, optional label, optional version (0 = the file as it is now; -1 = the version kept ' +
-        'before it, -2 the one before that).',
+        'side by side, in the order given. A video (.mov/.mp4/.m4v) shows as a grid of frames the user can play in place. Each item: path, ' +
+        'optional label, optional version (0 = the file as it is now; -1 = the version kept before it, -2 the one before that), and for a video ' +
+        'optional chapters ({ label, at } in seconds) to jump to.',
       isDeferred: true,
       inputSchema: {
         type: 'object',
@@ -1010,7 +1147,16 @@ export const register: Register = on => {
             maxItems: 6,
             items: {
               type: 'object',
-              properties: { path: { type: 'string' }, label: { type: 'string' }, version: { type: 'integer', maximum: 0 } },
+              properties: {
+                path: { type: 'string' },
+                label: { type: 'string' },
+                version: { type: 'integer', maximum: 0 },
+                chapters: {
+                  type: 'array',
+                  description: 'For a video: moments worth jumping to, listed beside the player, e.g. what changed and when.',
+                  items: { type: 'object', properties: { label: { type: 'string' }, at: { type: 'number', description: 'seconds' } }, required: ['label', 'at'] },
+                },
+              },
               required: ['path'],
             },
           },
@@ -1143,7 +1289,7 @@ export const register: Register = on => {
       const line = await next(e)
       const drawn = []
       for (const [id, card] of toolCards) {
-        drawn.push(await drawCard($, ui, id, card, e.viewport?.columns))
+        drawn.push(await drawCard($, ui, id, card, e.viewport?.columns, e.requestId))
       }
       return (
         <ui.Box flexDirection="column">
@@ -1184,7 +1330,7 @@ export const register: Register = on => {
       if (card.shots.every(one => readPaths.has(one.key))) {
         continue
       }
-      const tree = await drawCard($, ui, id, card, columns)
+      const tree = await drawCard($, ui, id, card, columns, e.requestId)
       if (tree) {
         trees.push(tree)
       }
@@ -1211,7 +1357,7 @@ export const register: Register = on => {
       void measure($, e.viewport)
       const row = await next(e)
       const ui = $.ui.resolve(e)
-      const tree = await drawCard($, ui, id, card, e.viewport?.columns)
+      const tree = await drawCard($, ui, id, card, e.viewport?.columns, e.requestId)
       return (
         <ui.Box flexDirection="column">
           {row}

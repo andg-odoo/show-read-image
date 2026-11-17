@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { addVersion, cellFromTmux, cellOf, commandKind, parseFrameLine, playerBox, isVideoPath, longestGap, sampleTimes, samplesRow, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+import { addVersion, cellFromTmux, cellOf, clockOf, commandKind, parseFrameLine, playWord, playerBox, scrubChunks, isVideoPath, longestGap, sampleTimes, samplesRow, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
 
 // The test runtime has timers; the mod's lib leaves them out
 declare const setTimeout: (done: () => void, ms: number) => unknown
@@ -969,4 +969,83 @@ test('a playing video shrinks with its pane', async ($, on) => {
   // A new size is a new Image, not frames swapped into the old one
   expect(small?.key).not.toBe(big?.key)
   await narrow.unmount()
+})
+
+test('the scrub bar, the play word and clip times', () => {
+  expect(clockOf(9.6)).toBe('0:09.6')
+  expect(clockOf(75, true)).toBe('1:15')
+  expect(playWord('idle', 0)).toBe('▶ Play')
+  expect(playWord('playing', 3)).toBe('❚❚ Pause')
+  expect(playWord('paused', 3)).toBe('▶ Resume')
+  expect(playWord('ended', 9)).toBe('↺ Replay')
+  expect(scrubChunks(10, 4, 5).map(chunk => chunk.label).join('')).toBe('━━━━●─────')
+  expect(scrubChunks(10, 4, 5).map(chunk => chunk.isAhead)).toEqual([false, false, false, true, true])
+})
+
+test('a video card plays in place, with a scrub bar and chapters that jump', async ($, on) => {
+  const written = new Map<string, string>()
+  const spawned: string[][] = []
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('process.run', (_, e) => {
+    const line = e.argv.join(' ')
+    const stdout = line === 'uname -s'
+      ? 'Darwin\n'
+      : line.includes('command -v') ? '/usr/bin/x\n'
+      : e.argv[0]!.endsWith('/filmstrip') ? '{"duration":10,"frames":300,"gap":0.03,"gapAt":0.5}\n'
+      : line.includes('stream=width,height') ? '390,844\n'
+      : line.includes('packet=pts_time') ? '0\n0.05\n'
+      : line.includes('format=duration') ? '10\n'
+      : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('process.spawn', async function* (_, e) {
+    spawned.push([...e.argv])
+    yield { stream: 'stdout' as const, text: `FRAME 0.000 ${RED}\n` }
+    return { value: { code: 0, signal: null } }
+  })
+  on('fs.exists', () => ({ value: true }))
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/qa.mov' || e.path.endsWith('-strip.png')) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 5, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => (e.path.endsWith('-strip.png') ? { value: { base64: BLUE } } : { value: written.get(e.path) ?? '' }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const chapters = [{ label: 'Invites become chips', at: 7 }, { label: 'Dates pick a range', at: 3 }]
+  await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'qa', title: 'New trip form', images: [{ path: '/s/qa.mov', chapters }] })
+  const mount = () =>
+    $.ui.mount({
+      plugin: 'show-read-image', surface: 'terminal', component: 'ToolUse', requestId: 'qa', viewport: { columns: 140, rows: 50 },
+      props: { tool_use_id: 'qa', tool: 'mcp__show-read-image__show_images', input: {}, isRunning: false, isErrored: false, isInterrupted: false, output: '' },
+    })
+  const card = await mount()
+  // Chapters are listed in time order, each time a link
+  expect(await card.find({ type: 'Text', text: '1. Dates pick a range' })).toBeDefined()
+  expect((await card.find({ type: 'Button', key: 'qa-chapter-1-at' }))?.props.label).toBe('0:07')
+  await card.press({ key: 'qa-play' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  expect(spawned[0]?.at(-1)).toBe('0.000')
+  await card.unmount()
+
+  const playing = await mount()
+  expect(await playing.find({ type: 'Text', text: 'Video' })).toBeDefined()
+  expect(await playing.find({ type: 'Text', text: ' 0:10' })).toBeDefined()
+  await playing.press({ key: 'qa-chapter-1-at' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  expect(spawned.at(-1)?.at(-1)).toBe('7.000')
+  await playing.press({ key: 'qa-frames' })
+  await playing.unmount()
+  const rest = await mount()
+  expect(await rest.find({ type: 'Button', key: 'qa-play' })).toBeDefined()
+  await rest.unmount()
 })
