@@ -194,6 +194,11 @@ test('image paths come from what a command printed or, for an image maker, what 
   expect(imagePathsIn('saved /tmp/chart.png', 'python plot.py')).toEqual(['/tmp/chart.png'])
   // A build naming an image in its arguments did not necessarily make it
   expect(imagePathsIn('', 'cp /a/in.png /b/out.png')).toEqual([])
+  // A maker's image is its last image argument, resolved against where it ran
+  expect(imagePathsIn('', 'sips -s format jpeg /a/in.png --out /b/out.jpg')).toEqual(['/b/out.jpg'])
+  expect(imagePathsIn('', 'magick in.jpg out.png', '/work', '/home/me')).toEqual(['/work/out.png'])
+  expect(imagePathsIn('', 'cd ~/shots && screencapture -x now.png', '/work', '/home/me')).toEqual(['/home/me/shots/now.png'])
+  expect(imagePathsIn('', 'screencapture -x $OUT/now.png', '/work', '/home/me')).toEqual([])
   expect(imagePathsIn(JSON.stringify({ screenshotPath: '/t/full.png', thumbnailPath: '/t/thumb.png' }))).toEqual(['/t/full.png'])
   expect(imagePathsIn('/a/1.png /a/2.png /a/3.png /a/4.png /a/5.png', 'make shots')).toHaveLength(4)
 
@@ -293,7 +298,71 @@ test('show_images draws a titled, unread card and can step back a version', asyn
   const back = await mount('show-2')
   expect((await back.find({ type: 'Text', text: /v1\/2/ }))?.text).toContain('not read by the agent')
 
+  expect((await back.findAll({ type: 'Image' })).map(found => (found.props.source as { png?: string }).png)).toEqual([RED])
+  const clamped = await $.tool.call({ tool, tool_use_id: 'show-4', images: [{ path: '/s/a.png', version: -5 }] })
+  expect(String(clamped.result)).toContain('showing the oldest')
+
   const missing = await $.tool.call({ tool, tool_use_id: 'show-3', images: [{ path: '/s/none.png' }] })
   expect(String(missing.result)).toContain('Could not show: /s/none.png')
   await back.unmount()
+})
+
+test('a tool card still draws after its path has kept ten newer versions, and Glob makes none', async ($, on) => {
+  const written = new Map<string, string>()
+  let content = RED
+  let edits = 1
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('fs.stat', (_, e) => {
+    if (e.path !== '/tmp/s.png') {
+      throw new Error('ENOENT')
+    }
+    return { value: { kind: 'file' as const, size: 90, mtimeMs: edits, isLink: false } }
+  })
+  on('fs.read', (_, e) => (e.path === '/tmp/s.png' ? { value: { base64: content } } : { value: written.get(e.path) ?? '' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('tool.call', () => ({ result: 'ok', text: 'Wrote screenshot to: /tmp/s.png' }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) {
+      await new Promise<void>(done => setTimeout(done, 5))
+    }
+  }
+
+  await $.tool.call({ tool: 'Bash', command: 'xcrun simctl io booted screenshot /tmp/s.png', tool_use_id: 'first' })
+  await settle()
+  for (let n = 0; n < 11; n++) {
+    content = `${RED.slice(0, -4)}${String(n).padStart(2, '0')}==`
+    edits += 1
+    await $.tool.call({ tool: 'Bash', command: 'xcrun simctl io booted screenshot /tmp/s.png', tool_use_id: `later-${n}` })
+    await settle()
+  }
+  // Glob is a host tool this build's typings do not list
+  await $.tool.call({ tool: 'Glob', pattern: '**/*.png', tool_use_id: 'glob-1' } as never)
+  await settle()
+
+  const mount = (id: string, tool: string) =>
+    $.ui.mount({
+      plugin: 'show-read-image',
+      surface: 'terminal',
+      component: 'ToolUse',
+      requestId: id,
+      viewport: { columns: 120, rows: 40 },
+      props: { tool_use_id: id, tool, input: {}, isRunning: false, isErrored: false, isInterrupted: false, output: 'ok' },
+    })
+  const first = await mount('first', 'Bash')
+  expect((await first.findAll({ type: 'Image' })).map(found => (found.props.source as { png?: string }).png)).toEqual([RED])
+  expect(await first.find({ type: 'Text', text: /older than the kept versions/ })).toBeDefined()
+  await first.unmount()
+  const glob = await mount('glob-1', 'Glob')
+  expect(await glob.findAll({ type: 'Image' })).toHaveLength(0)
+  await glob.unmount()
 })

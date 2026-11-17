@@ -47,8 +47,9 @@ const cards = atom({ plugin: 'show-read-image', key: 'cards' } as const, {} as R
 const MIN_FRAME = 30
 const MAX_SIDE = 6
 const MAX_CARDS_KEPT = 200
-// Our own tools draw their own cards; computer-use screenshots are the agent's working view, not results
-const SKIP_TOOLS = /^(Read$|mcp__show-read-image__|mcp__computer-use__)/
+// Our own tools draw their own cards; computer-use screenshots are the agent's working view; the rest name
+// files they found or touched, not images they made
+const SKIP_TOOLS = /^(Read|Glob|Grep|LS|Edit|MultiEdit|Write|NotebookRead|NotebookEdit|WebFetch|WebSearch)$|^mcp__(show-read-image|computer-use)__/
 const UNREAD = 'not read by the agent'
 // The session's tty size in cells and pixels; a hook process has no tty of its own, so it opens /dev/tty
 const WINSIZE = `perl -e 'open(T, "</dev/tty") or exit 1; my $w = " " x 8; ioctl(T, ($^O eq "darwin" ? 0x40087468 : 0x5413), $w) or exit 1; print join(" ", unpack("S4", $w))'`
@@ -68,6 +69,16 @@ const versionBytes = new Map<string, string>()
 const diskBytes = new Map<string, { mtimeMs: number; base64: string }>()
 let home: string | undefined
 let cell = DEFAULT_CELL
+const MAX_CACHED = 24
+
+// Keeps the most recently used few; each entry can hold a couple of MB of base64
+function remember<K, V>(map: Map<K, V>, key: K, value: V) {
+  map.delete(key)
+  map.set(key, value)
+  if (map.size > MAX_CACHED) {
+    map.delete(map.keys().next().value as K)
+  }
+}
 let measuredFor = ''
 
 // Once per viewport size: the cell shape changes with the font, not with every draw
@@ -104,17 +115,24 @@ async function kept($: EngineInterface) {
   return (await read($, history)) as Record<string, ShowReadImageHistory>
 }
 
+// Versions are stored by content; `slot` finds ones written by 0.3, which stored them in a ring of slots
 async function readVersion($: EngineInterface, path: string, slot: number, hash: string) {
-  const file = `${historyDir(await homeOf($), path)}/${slot}.b64`
-  const key = `${file}:${hash}`
+  const dir = historyDir(await homeOf($), path)
+  const key = `${dir}:${hash}`
   let base64 = versionBytes.get(key)
   if (base64 === undefined) {
-    base64 = String(await $.fs.read(file).catch(() => ''))
-    if (!base64 || hashOf(base64) !== hash) {
+    for (const file of [`${dir}/${hash}.b64`, ...(slot >= 0 ? [`${dir}/${slot}.b64`] : [])]) {
+      const text = String(await $.fs.read(file).catch(() => ''))
+      if (text && hashOf(text) === hash) {
+        base64 = text
+        break
+      }
+    }
+    if (base64 === undefined) {
       return undefined
     }
-    versionBytes.set(key, base64)
   }
+  remember(versionBytes, key, base64)
   return base64
 }
 
@@ -130,7 +148,7 @@ async function readDisk($: EngineInterface, path: string) {
   const bytes = await $.fs.read(path, { as: 'bytes' }).catch(() => undefined)
   const base64 = typeof bytes === 'object' ? bytes.base64 : undefined
   if (base64) {
-    diskBytes.set(path, { mtimeMs: stat.mtimeMs, base64 })
+    remember(diskBytes, path, { mtimeMs: stat.mtimeMs, base64 })
   }
   return base64
 }
@@ -141,12 +159,24 @@ async function record($: EngineInterface, path: string, base64: string) {
   if (!added) {
     return
   }
-  await $.fs.write(`${historyDir(await homeOf($), path)}/${added.version.slot}.b64`, base64)
+  const dir = historyDir(await homeOf($), path)
+  await $.fs.write(`${dir}/${hash}.b64`, base64)
+  let dropped: string[] = []
   const all = await update($, history, before => {
     const again = addVersion(before[path], hash, added.version.at)
-    return again ? { ...before, [path]: again.entry } : before
+    if (!again) {
+      return before
+    }
+    const now = new Set(again.entry.versions.map(one => one.hash))
+    dropped = (before[path]?.versions ?? []).map(one => one.hash).filter(old => !now.has(old))
+    return { ...before, [path]: again.entry }
   })
   await $.store.set('history', all)
+  const held = new Set(Object.values(await read($, cards)).flatMap(card => card.shots.filter(one => one.key === path).map(one => one.hash)))
+  const gone = dropped.filter(old => !held.has(old)).map(old => `${dir}/${old}.b64`)
+  if (gone.length > 0) {
+    await $.process.run(['rm', '-f', ...gone]).catch(() => undefined)
+  }
 }
 
 function room(columns: number | undefined, isExpanded?: boolean): Box {
@@ -282,7 +312,9 @@ async function drawRead(
   const stem = path ? splitPath(path).stem : 'image'
   const own = hashFor(requestId, file.base64)
   const saved = (await kept($))[path]?.versions ?? []
-  const versions = saved.some(one => one.hash === own) ? saved : [...saved, { hash: own, at: 0, slot: -1 }]
+  // A row older than the kept history draws alone rather than posing as the newest version
+  const isKept = saved.some(one => one.hash === own)
+  const versions = isKept ? saved : [{ hash: own, at: 0, slot: -1 }]
   const ownAt = versions.findIndex(one => one.hash === own)
   const stepped = await read($, memberOf(step, { requestId }))
   let at = stepped >= 0 && stepped < versions.length ? stepped : ownAt
@@ -299,7 +331,7 @@ async function drawRead(
   const size = at === ownAt ? sizeOf(file) : (pngSize(base64) ?? sizeOf(file))
   const cells = fit(size, box.columns, box.rows, cell)
   const hasHistory = versions.length > 1
-  const meta = [isUnread ? UNREAD : '', pixels(size), hasHistory ? `v${at + 1}/${versions.length}` : '', hasHistory && version.at ? clock(version.at) : '']
+  const meta = [isUnread ? UNREAD : '', !isKept && saved.length > 0 ? 'older than the kept versions' : '', pixels(size), hasHistory ? `v${at + 1}/${versions.length}` : '', hasHistory && version.at ? clock(version.at) : '']
     .filter(Boolean)
     .join(' · ')
   const go = (by: number) => () =>
@@ -401,10 +433,12 @@ async function pngOfFile($: EngineInterface, path: string): Promise<string | und
   if (isPngPath(path) && stat.size <= MAX_PNG) {
     return readDisk($, path)
   }
-  const out = `${await homeOf($)}/.cache/show-read-image/converted/${hashOf(`${path}:${stat.mtimeMs}`).slice(0, 12)}`
+  // One set of conversions per source path, redone when the source is newer
+  const out = convertedOf(await homeOf($), path)
   for (const side of [2048, 1400, 1000]) {
     const to = `${out}-${side}.png`
-    if (!(await $.fs.exists(to)) && !(await toPng($, path, to, side))) {
+    const made = await $.fs.stat(to).catch(() => undefined)
+    if ((!made || made.mtimeMs < stat.mtimeMs) && !(await toPng($, path, to, side))) {
       return undefined
     }
     const size = (await $.fs.stat(to).catch(() => undefined))?.size ?? Infinity
@@ -415,12 +449,23 @@ async function pngOfFile($: EngineInterface, path: string): Promise<string | und
   return undefined
 }
 
-async function pngOfBlock($: EngineInterface, base64: string, key: string): Promise<string | undefined> {
+function convertedOf(home: string, path: string) {
+  return `${home}/.cache/show-read-image/converted/${hashOf(path).slice(0, 12)}`
+}
+
+// A block that is not a small PNG goes through a file of its own call, removed with its conversions after
+async function pngOfBlock($: EngineInterface, base64: string, id: string): Promise<string | undefined> {
   if (isPng(base64) && base64.length * 0.75 <= MAX_PNG) {
     return base64
   }
-  const raw = `${await homeOf($)}/.cache/show-read-image/converted/${hashOf(key).slice(0, 12)}.raw`
-  return (await writeBytes($, raw, base64)) ? pngOfFile($, raw) : undefined
+  const home = await homeOf($)
+  const raw = `${home}/.cache/show-read-image/converted/${id}.raw`
+  try {
+    return (await writeBytes($, raw, base64)) ? await pngOfFile($, raw) : undefined
+  } finally {
+    const out = convertedOf(home, raw)
+    await $.process.run(['rm', '-f', raw, `${out}-2048.png`, `${out}-1400.png`, `${out}-1000.png`]).catch(() => undefined)
+  }
 }
 
 // Keeps what a tool call produced as versions under the call's id, so its row can draw them later
@@ -433,7 +478,7 @@ async function collect($: EngineInterface, id: string, tool: string, input: Reco
     const base = `${short}-${hashOf(JSON.stringify(args).slice(0, 300)).slice(0, 6)}`
     for (const [i, block] of blocks.entries()) {
       const key = blocks.length > 1 ? `${base}-${i + 1}` : base
-      const base64 = await pngOfBlock($, block.base64, key)
+      const base64 = await pngOfBlock($, block.base64, `${id}-${i}`)
       if (base64) {
         await record($, key, base64)
         shots.push({ key, label: short, hash: hashOf(base64), isUnread: false })
@@ -441,7 +486,8 @@ async function collect($: EngineInterface, id: string, tool: string, input: Reco
     }
   } else {
     const command = tool === 'Bash' && typeof input.command === 'string' ? input.command : undefined
-    for (const path of imagePathsIn(text, command)) {
+    const base = command ? await $.session.cwd().catch(() => '/') : '/'
+    for (const path of imagePathsIn(text, command, base, await homeOf($))) {
       const base64 = await pngOfFile($, path)
       if (base64) {
         await record($, path, base64)
@@ -455,11 +501,12 @@ async function collect($: EngineInterface, id: string, tool: string, input: Reco
 }
 
 async function keepCard($: EngineInterface, id: string, card: ShowReadImageCard) {
-  await update($, cards, all => {
-    const ids = Object.keys(all)
-    const kept = ids.length >= MAX_CARDS_KEPT ? Object.fromEntries(ids.slice(-MAX_CARDS_KEPT / 2).map(k => [k, all[k]!])) : all
+  const all = await update($, cards, before => {
+    const ids = Object.keys(before)
+    const kept = ids.length >= MAX_CARDS_KEPT ? Object.fromEntries(ids.slice(-MAX_CARDS_KEPT / 2).map(k => [k, before[k]!])) : before
     return { ...kept, [id]: card }
   })
+  await $.store.set('cards', all)
 }
 
 type ShowInput = { images: { path: string; label?: string; version?: number }[]; title?: string }
@@ -468,6 +515,7 @@ type ShowInput = { images: { path: string; label?: string; version?: number }[];
 async function show($: EngineInterface, id: string, input: ShowInput): Promise<string> {
   const shots: ShowReadImageCardShot[] = []
   const missing: string[] = []
+  const notes: string[] = []
   for (const image of input.images.slice(0, MAX_SIDE)) {
     const base64 = await pngOfFile($, image.path)
     if (!base64) {
@@ -477,19 +525,27 @@ async function show($: EngineInterface, id: string, input: ShowInput): Promise<s
     await record($, image.path, base64)
     const versions = (await kept($))[image.path]?.versions ?? []
     const now = versions.findIndex(one => one.hash === hashOf(base64))
-    const at = Math.max(0, now + Math.min(0, Math.trunc(image.version ?? 0)))
+    const wanted = now + Math.min(0, Math.trunc(image.version ?? 0))
+    const at = Math.max(0, wanted)
+    if (wanted < 0) {
+      notes.push(`${image.path} has only ${now} older version(s) kept; showing the oldest`)
+    }
+    if (now < versions.length - 1) {
+      notes.push(`${image.path} now matches kept version ${now + 1} of ${versions.length}; versions step back from there`)
+    }
     shots.push({ key: image.path, label: image.label ?? splitPath(image.path).stem, hash: versions[at]?.hash ?? hashOf(base64), isUnread: true })
   }
   if (shots.length > 0) {
     await keepCard($, id, input.title === undefined ? { shots } : { title: input.title, shots })
   }
   const shown = `Shown ${shots.length} image(s) to the user, marked as not read by you.`
-  return missing.length > 0 ? `${shown} Could not show: ${missing.join(', ')}` : shown
+  return [shown, ...notes.map(note => `Note: ${note}.`), ...(missing.length > 0 ? [`Could not show: ${missing.join(', ')}`] : [])].join(' ')
 }
 
+// By content, so a card still draws after its version has left the path's history
 async function bytesOf($: EngineInterface, shot: ShowReadImageCardShot) {
   const version = (await kept($))[shot.key]?.versions.find(one => one.hash === shot.hash)
-  return version ? readVersion($, shot.key, version.slot, version.hash) : undefined
+  return readVersion($, shot.key, version?.slot ?? -1, shot.hash)
 }
 
 // One picture draws as a read does, with its versions; several share a frame
@@ -536,6 +592,10 @@ export const register: Register = on => {
     if (stored && typeof stored === 'object') {
       await update($, history, all => (Object.keys(all).length > 0 ? all : (stored as Record<string, ShowReadImageHistory>)))
     }
+    const storedCards = await $.store.get('cards')
+    if (storedCards && typeof storedCards === 'object') {
+      await update($, cards, all => (Object.keys(all).length > 0 ? all : (storedCards as Record<string, ShowReadImageCard>)))
+    }
     await $.tool.register({
       name: 'show_images',
       description:
@@ -579,19 +639,22 @@ export const register: Register = on => {
       await record($, e.file_path, file.base64).catch(() => undefined)
     }
     return ran
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) => (next.called ? { deny: 'show-read-image: the tool call failed under its hook.' } : next(e)))
 
   // Images any other tool produced: inline blocks, or image files it printed or, for an image-making command, named
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
-    const tool = String(e.tool)
-    if (SKIP_TOOLS.test(tool) || ran.deny !== undefined || ran.isError === true) {
-      return ran
+    try {
+      const tool = String(e.tool)
+      if (!SKIP_TOOLS.test(tool) && ran.deny === undefined && ran.isError !== true) {
+        const input = e as unknown as Record<string, unknown>
+        void collect($, e.tool_use_id, tool, input, ran.result, ran.text ?? '').catch(() => undefined)
+      }
+    } catch {
+      // The tool already ran; its result stands whatever happens to the card
     }
-    const input = e as unknown as Record<string, unknown>
-    void collect($, e.tool_use_id, tool, input, ran.result, ran.text ?? '').catch(() => undefined)
     return ran
-  }).catch(($, e, next) => (next.called ? { deny: 'show-read-image: its hook failed after the tool ran.' } : next(e)))
+  }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const reads = readsOf(e.props.calls)

@@ -201,6 +201,7 @@ export function commandKind(command: string): CommandKind {
 
 const PATH_IN_TEXT = /(?:^|[\s"'=(:])(\/[^\s"'()<>]+?\.(?:png|jpe?g))(?=$|[\s"'),;<>])/gi
 const IMAGE_PATH = /^\/.+\.(png|jpe?g)$/i
+const IMAGE_FILE = /\.(png|jpe?g)$/i
 
 // A JSON result names paths whose keys say what they are; a thumbnail beside a full image is a duplicate
 function jsonPaths(text: string): string[] {
@@ -228,19 +229,38 @@ function jsonPaths(text: string): string[] {
   return (full.length > 0 ? full : hits).map(hit => hit.path)
 }
 
-// Image paths a tool call made: printed in its output, or, for an image-making command, named in it
-export function imagePathsIn(output: string, command?: string): string[] {
+// The directory a command runs in after a leading `cd DIR &&`
+function workingDir(command: string, base: string, home: string) {
+  const cd = /^\s*cd\s+("[^"]+"|'[^']+'|\S+)\s*&&/.exec(command)?.[1]?.replace(/^["']|["']$/g, '')
+  return cd ? absolute(cd, base, home) : base
+}
+
+function absolute(token: string, base: string, home: string) {
+  if (token.startsWith('/')) {
+    return token
+  }
+  if (token === '~' || token.startsWith('~/')) {
+    return home + token.slice(1)
+  }
+  return `${base.replace(/\/$/, '')}/${token.replace(/^\.\//, '')}`
+}
+
+// Image paths a tool call made: printed in its output, or, for an image-making command, the image it wrote,
+// which is its last image argument (`sips in.png --out out.png`, `magick in.jpg out.png`)
+export function imagePathsIn(output: string, command?: string, base = '/', home = '/'): string[] {
   const kind = command === undefined ? 'other' : commandKind(command)
   const fromJson = jsonPaths(output.trim())
   const printed = kind === 'listing' ? [] : fromJson.length > 0 ? fromJson : [...output.matchAll(PATH_IN_TEXT)].map(m => m[1]!)
-  const named =
+  const made =
     kind === 'maker'
       ? (command ?? '')
           .split(/\s+/)
           .map(token => token.replace(/^["']|["']$/g, ''))
-          .filter(token => IMAGE_PATH.test(token))
+          .filter(token => IMAGE_FILE.test(token) && !token.includes('$'))
+          .slice(-1)
+          .map(token => absolute(token, workingDir(command ?? '', base, home), home))
       : []
-  return [...new Set([...printed, ...named])].slice(0, MAX_TOOL_CARDS)
+  return [...new Set([...printed, ...made])].slice(0, MAX_TOOL_CARDS)
 }
 
 export type ImageBlock = { base64: string; mime: string }
