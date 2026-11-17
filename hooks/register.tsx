@@ -536,8 +536,8 @@ async function pngOfFile($: EngineInterface, path: string): Promise<string | und
     return readDisk($, path)
   }
   // One set of conversions per source path, redone when the source is newer
-  const out = convertedOf(await homeOf($), path)
-  for (const side of [2048, 1400, 1000]) {
+  const out = convertedOf(await convertedDir($), path)
+  for (const side of SIDES) {
     const to = `${out}-${side}.png`
     const made = await $.fs.stat(to).catch(() => undefined)
     if ((!made || made.mtimeMs < stat.mtimeMs) && !(await toPng($, path, to, side))) {
@@ -551,8 +551,23 @@ async function pngOfFile($: EngineInterface, path: string): Promise<string | und
   return undefined
 }
 
-function convertedOf(home: string, path: string) {
-  return `${home}/.cache/show-read-image/converted/${hashOf(path).slice(0, 12)}`
+// Longest sides to try, largest first, until a conversion fits in 2 MiB; noise and photos need the small ones
+const SIDES = [2048, 1400, 1000, 700, 500]
+
+let madeDir: string | undefined
+
+// The converters write files but don't make folders, unlike $.fs.write
+async function convertedDir($: EngineInterface) {
+  const dir = `${await homeOf($)}/.cache/show-read-image/converted`
+  if (madeDir !== dir) {
+    await $.process.run(['mkdir', '-p', dir])
+    madeDir = dir
+  }
+  return dir
+}
+
+function convertedOf(dir: string, path: string) {
+  return `${dir}/${hashOf(path).slice(0, 12)}`
 }
 
 // A block that is not a small PNG goes through a file of its own call, removed with its conversions after
@@ -560,13 +575,13 @@ async function pngOfBlock($: EngineInterface, base64: string, id: string): Promi
   if (isPng(base64) && base64.length * 0.75 <= MAX_PNG) {
     return base64
   }
-  const home = await homeOf($)
-  const raw = `${home}/.cache/show-read-image/converted/${id}.raw`
+  const dir = await convertedDir($)
+  const raw = `${dir}/${id}.raw`
   try {
     return (await writeBytes($, raw, base64)) ? await pngOfFile($, raw) : undefined
   } finally {
-    const out = convertedOf(home, raw)
-    await $.process.run(['rm', '-f', raw, `${out}-2048.png`, `${out}-1400.png`, `${out}-1000.png`]).catch(() => undefined)
+    const out = convertedOf(dir, raw)
+    await $.process.run(['rm', '-f', raw, ...SIDES.map(side => `${out}-${side}.png`)]).catch(() => undefined)
   }
 }
 

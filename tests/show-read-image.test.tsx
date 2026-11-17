@@ -587,9 +587,13 @@ test('a Read whose PNG is over 2 MiB is converted from the file on disk', async 
     return { value: undefined }
   })
   const converted: string[] = []
+  const madeDirs: string[] = []
   on('process.run', (_, e) => {
     if (e.argv[0] === 'sips') {
       converted.push(e.argv[e.argv.length - 3]!)
+    }
+    if (e.argv[0] === 'mkdir' && converted.length === 0) {
+      madeDirs.push(e.argv[e.argv.length - 1]!)
     }
     return {
       value: { exitCode: 0, stdout: e.argv.join(' ').includes('command -v sips') ? '/usr/bin/sips' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
@@ -613,6 +617,8 @@ test('a Read whose PNG is over 2 MiB is converted from the file on disk', async 
   await $.tool.call({ tool: 'Read', file_path: '/s/huge.png', tool_use_id: 'huge' })
   await new Promise<void>(done => setTimeout(done, 30))
   expect(converted).toEqual(['/s/huge.png'])
+  // The converter can't make its output folder, so it exists before it runs
+  expect(madeDirs).toEqual(['/home/me/.cache/show-read-image/converted'])
   expect([...written.entries()].find(([path]) => path.endsWith('last-read.txt'))?.[1]).toContain('image/png')
   const row = await $.ui.mount({
     plugin: 'show-read-image',
