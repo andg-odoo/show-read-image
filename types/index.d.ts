@@ -18,6 +18,7 @@ export type ShowReadImageCardShot = {
   width?: number
   height?: number
   note?: string
+  samples?: string
   isVideo?: boolean
 }
 

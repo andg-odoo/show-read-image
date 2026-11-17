@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { addVersion, cellFromTmux, cellOf, commandKind, isVideoPath, longestGap, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+import { addVersion, cellFromTmux, cellOf, commandKind, isVideoPath, longestGap, sampleTimes, samplesRow, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
 
 // The test runtime has timers; the mod's lib leaves them out
 declare const setTimeout: (done: () => void, ms: number) => unknown
@@ -642,6 +642,8 @@ test('a video is summed up by its length, frame count and longest gap between fr
   expect(stripLayout(1206, 2622)).toEqual({ columns: 4, rows: 2, cellHeight: 480 })
   expect(stripLayout(1920, 1080)).toEqual({ columns: 2, rows: 4, cellHeight: 270 })
   expect(imagePathsIn('Recording saved to /tmp/rec.mov')).toEqual(['/tmp/rec.mov'])
+  expect(samplesRow(sampleTimes(5, 8, false))).toBe('frames at 0.0 0.6 1.3 1.9 2.5 3.1 3.8 4.4 s')
+  expect(samplesRow(sampleTimes(600, 8, true))).toBe('frames at 38 113 188 263 338 413 488 563 s')
 })
 
 test('show_images draws a video as its filmstrip, with its timing and an open button', async ($, on) => {
@@ -690,7 +692,42 @@ test('show_images draws a video as its filmstrip, with its timing and an open bu
     props: { tool_use_id: 'vid', tool: 'mcp__show-read-image__show_images', input: {}, isRunning: false, isErrored: false, isInterrupted: false, output: '' },
   })
   expect(await card.find({ type: 'Text', text: /2\.50 s · 4 frames · longest gap 1\.60 s at 2\.10 s/ })).toBeDefined()
+  expect(await card.find({ type: 'Text', text: 'frames at 0.0 0.3 0.6 0.9 1.3 1.6 1.9 2.2 s' })).toBeDefined()
   await card.press({ key: 'vid-open' })
   expect(ran.some(argv => argv[0] === 'xdg-open' && argv[1] === '/s/clip.mov')).toBe(true)
   await card.unmount()
+})
+
+test('a video over a minute is sampled by seeking to each frame, not decoded whole', async ($, on) => {
+  const ran: string[][] = []
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', () => ({ value: undefined }))
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    const line = e.argv.join(' ')
+    const stdout = line === 'uname -s'
+      ? 'Linux\n'
+      : line.includes('command -v') ? '/usr/bin/x\n'
+      : line.includes('stream=width,height') ? '1920,1080\n'
+      : line.includes('packet=pts_time') ? '0\n1\n2\n'
+      : line.includes('format=duration') ? '600\n'
+      : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/long.mov' || e.path.endsWith('-strip.png')) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 5, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => ({ value: e.path.endsWith('-strip.png') ? { base64: RED } : '' }))
+  await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'long', images: [{ path: '/s/long.mov' }] })
+  const ffmpeg = ran.filter(argv => argv[0] === 'ffmpeg')
+  expect(ffmpeg.filter(argv => argv.includes('-ss')).map(argv => argv[argv.indexOf('-ss') + 1])).toEqual([
+    '37.500', '112.500', '187.500', '262.500', '337.500', '412.500', '487.500', '562.500',
+  ])
+  expect(ffmpeg.some(argv => argv.join(' ').includes('fps='))).toBe(false)
+  expect(ffmpeg.at(-1)?.join(' ')).toContain('tile=2x4')
 })

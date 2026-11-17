@@ -28,6 +28,7 @@ import {
   pngSize,
   sizeOf,
   sizeWarning,
+  samplesRow,
   splitPath,
   videoNote,
 } from './logic'
@@ -399,7 +400,7 @@ async function drawRead(
   columns: number | undefined,
   isExpanded?: boolean,
   isUnread?: boolean,
-  video?: { note: string; path: string },
+  video?: { note: string; path: string; samples?: string },
 ) {
   const { Box, Button, Image, Text } = ui
   const box = room(columns, isExpanded)
@@ -451,8 +452,10 @@ async function drawRead(
       ...(video ? [<Button key={`${requestId}-open`} plain dimColor label="open" onPress={() => openExternally($, video.path)} />] : []),
       ExpandButton($, ui, requestId, stem, base64, path || undefined, size),
     ] }
+  // Frames the video tool didn't stamp with their time get the times in a row under the grid
+  const samples = video?.samples ? [<Text key={`${requestId}-samples`} dimColor>{video.samples}</Text>] : []
   if (!hasHistory) {
-    return Frame(ui, frame, image)
+    return Frame(ui, frame, image, ...samples)
   }
   const shown = await read($, memberOf(view, { requestId }))
   const chip = (to: ShowReadImageView, label: string) => (
@@ -499,7 +502,7 @@ async function drawRead(
     [<Text key="note" dimColor>{note}</Text>],
   )
   const width = buttonsWidth(['now', 'side by side']) + 3 + position.length + 4 + 3 + note.length
-  return Frame(ui, { ...frame, controls: width }, controls, image)
+  return Frame(ui, { ...frame, controls: width }, controls, image, ...samples)
 }
 
 // A group's before/after pairs, an after read pairing with its before on disk, and the rest
@@ -591,9 +594,9 @@ async function pngOfBlock($: EngineInterface, base64: string, id: string): Promi
   }
 }
 
-type Picture = { base64: string; note?: string; isVideo?: true }
+type Picture = { base64: string; note?: string; samples?: string; isVideo?: true }
 
-const stripNotes = new Map<string, string>()
+const stripNotes = new Map<string, { note: string; samples?: string }>()
 
 // A video as a grid of eight timed frames, remade when the video is newer; its timing note is kept per version
 async function stripOf($: EngineInterface, video: string): Promise<Picture | undefined> {
@@ -609,10 +612,10 @@ async function stripOf($: EngineInterface, video: string): Promise<Picture | und
     if (!stats) {
       return undefined
     }
-    remember(stripNotes, key, videoNote(stats))
+    remember(stripNotes, key, stats.samples ? { note: videoNote(stats), samples: samplesRow(stats.samples) } : { note: videoNote(stats) })
   }
   const base64 = await pngOfFile($, out)
-  return base64 ? { base64, note: stripNotes.get(key)!, isVideo: true } : undefined
+  return base64 ? { base64, ...stripNotes.get(key)!, isVideo: true } : undefined
 }
 
 // What a path draws as: a picture, or for a video its filmstrip
@@ -625,7 +628,7 @@ async function pictureOf($: EngineInterface, path: string): Promise<Picture | un
 }
 
 function shotOf(path: string, picture: Picture, label = splitPath(path).stem): ShowReadImageCardShot {
-  const video = picture.isVideo ? { note: picture.note ?? '', isVideo: true } : {}
+  const video = picture.isVideo ? { note: picture.note ?? '', ...(picture.samples ? { samples: picture.samples } : {}), isVideo: true } : {}
   return { key: path, label, hash: hashOf(picture.base64), isUnread: true, ...video }
 }
 
@@ -769,7 +772,9 @@ async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadIm
   }
   if (pictures.length === 1 && card.title === undefined) {
     const dimensions = only.shot.width && only.shot.height ? { originalWidth: only.shot.width, originalHeight: only.shot.height } : undefined
-    const video = only.shot.isVideo ? { note: only.shot.note ?? 'video', path: only.shot.key } : undefined
+    const video = only.shot.isVideo
+      ? { note: only.shot.note ?? 'video', path: only.shot.key, ...(only.shot.samples ? { samples: only.shot.samples } : {}) }
+      : undefined
     return drawRead($, ui, id, only.shot.key, dimensions ? { base64: only.base64, dimensions } : { base64: only.base64 }, columns, false, only.shot.isUnread, video)
   }
   const { Box, Button } = ui

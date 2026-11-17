@@ -1,6 +1,6 @@
 import type { EngineInterface } from 'claude-code'
 
-import { longestGap, stripLayout } from './logic'
+import { SEEK_ABOVE_SECONDS, longestGap, sampleTimes, stripLayout } from './logic'
 import type { VideoStats } from './logic'
 
 // Image tools this machine has, looked up once a session: sips on macOS, ImageMagick or ffmpeg elsewhere
@@ -105,9 +105,36 @@ async function ffmpegStrip($: EngineInterface, video: string, out: string): Prom
     return undefined
   }
   const grid = stripLayout(width, height)
-  const filter = `fps=${(grid.columns * grid.rows) / duration},scale=-2:${grid.cellHeight},tile=${grid.columns}x${grid.rows}:padding=12:margin=12:color=0x17171a`
-  const made = await $.process.run(['ffmpeg', '-v', 'error', '-y', '-i', video, '-vf', filter, '-frames:v', '1', '-pix_fmt', 'rgb24', out], { timeoutMs: 180_000 })
-  return made.exitCode === 0 ? { duration, frames: times.length, ...longestGap(times) } : undefined
+  const count = grid.columns * grid.rows
+  const tile = `tile=${grid.columns}x${grid.rows}:padding=12:margin=12:color=0x17171a`
+  const isSeeking = duration > SEEK_ABOVE_SECONDS
+  const samples = sampleTimes(duration, count, isSeeking)
+  const made = isSeeking
+    ? await seekStrip($, video, out, samples, `scale=-2:${grid.cellHeight}`, tile)
+    : await $.process.run(
+        ['ffmpeg', '-v', 'error', '-y', '-i', video, '-vf', `fps=${count / duration},scale=-2:${grid.cellHeight},${tile}`, '-frames:v', '1', '-pix_fmt', 'rgb24', out],
+        { timeoutMs: 180_000 },
+      )
+  return made.exitCode === 0 ? { duration, frames: times.length, ...longestGap(times), samples } : undefined
+}
+
+// One seek per frame, each decoding only from the key frame before it, then the frames tiled into the grid
+async function seekStrip($: EngineInterface, video: string, out: string, samples: number[], scale: string, tile: string) {
+  const frame = (k: number) => `${out}-frame-${k}.png`
+  try {
+    for (const [k, t] of samples.entries()) {
+      const one = await $.process.run(['ffmpeg', '-v', 'error', '-y', '-ss', t.toFixed(3), '-i', video, '-frames:v', '1', '-vf', scale, frame(k)], { timeoutMs: 60_000 })
+      if (one.exitCode !== 0) {
+        return one
+      }
+    }
+    return await $.process.run(
+      ['ffmpeg', '-v', 'error', '-y', '-start_number', '0', '-i', `${out}-frame-%d.png`, '-vf', tile, '-frames:v', '1', '-pix_fmt', 'rgb24', out],
+      { timeoutMs: 60_000 },
+    )
+  } finally {
+    await $.process.run(['rm', '-f', ...samples.map((_, k) => frame(k))]).catch(() => undefined)
+  }
 }
 
 // Writes the grid to `out` and returns the clip's timing, or undefined when this machine has neither tool

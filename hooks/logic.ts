@@ -324,7 +324,21 @@ export function isVideoPath(path: string) {
   return /\.(mov|mp4|m4v)$/i.test(path)
 }
 
-export type VideoStats = { duration: number; frames: number; gap: number; gapAt: number }
+// `samples`: when each of the grid's frames is from, where the frames themselves aren't stamped with it
+export type VideoStats = { duration: number; frames: number; gap: number; gapAt: number; samples?: number[] }
+
+// Clips longer than this are sampled by seeking to each frame instead of decoding the whole video
+export const SEEK_ABOVE_SECONDS = 60
+
+// Where the grid's frames come from: the fps filter starts at 0; seeks take the middle of each eighth
+export function sampleTimes(duration: number, count: number, isSeeking: boolean) {
+  return Array.from({ length: count }, (_, k) => ((k + (isSeeking ? 0.5 : 0)) * duration) / count)
+}
+
+export function samplesRow(samples: number[]) {
+  const precise = samples.length > 1 && samples[1]! - samples[0]! < 1
+  return `frames at ${samples.map(t => t.toFixed(precise ? 1 : 0)).join(' ')} s`
+}
 
 // The longest wait between two frames: a screen recording only stores a frame when something changed, so a long
 // gap during an animation is a hitch
