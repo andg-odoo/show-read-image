@@ -897,3 +897,69 @@ test('a video expands to its filmstrip with play, and play starts ffmpeg in real
   expect(removed).toContain(folder)
   await again.unmount()
 })
+
+test('a playing video shrinks with its pane', async ($, on) => {
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  const written = new Map<string, string>()
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('process.run', (_, e) => {
+    const line = e.argv.join(' ')
+    const stdout = line === 'uname -s'
+      ? 'Darwin\n'
+      : line.includes('command -v') ? '/usr/bin/x\n'
+      : e.argv[0]!.endsWith('/filmstrip') ? '{"duration":1,"frames":3,"gap":0.05,"gapAt":0.05}\n'
+      : line.includes('stream=width,height') ? '390,844\n'
+      : line.includes('packet=pts_time') ? '0\n0.05\n'
+      : line.includes('format=duration') ? '1\n'
+      : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  // The macOS helper: a few 8×4 frames, then it ends
+  on('process.spawn', async function* () {
+    for (const t of [0, 0.05, 0.1]) {
+      yield { stream: 'stdout' as const, text: `FRAME ${t.toFixed(3)} ${RED}\n` }
+    }
+    return { value: { code: 0, signal: null } }
+  })
+  on('fs.exists', () => ({ value: true }))
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/clip.mov' || e.path.endsWith('-strip.png')) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 5, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => (e.path.endsWith('-strip.png') ? { value: { base64: BLUE } } : { value: written.get(e.path) ?? '' }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const shownResult = await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 's', images: [{ path: '/s/clip.mov' }] })
+  const card = await $.ui.mount({
+    plugin: 'show-read-image', surface: 'terminal', component: 'ToolUse', requestId: 's', viewport: { columns: 120, rows: 40 },
+    props: { tool_use_id: 's', tool: 'mcp__show-read-image__show_images', input: {}, isRunning: false, isErrored: false, isInterrupted: false, output: '' },
+  })
+  await card.press({ key: 's-expand' })
+  await card.unmount()
+  const pane = (bodyColumns: number) =>
+    $.ui.mount({
+      plugin: 'show-read-image', surface: 'terminal', component: 'Pane', requestId: 'show-read-image', viewport: { columns: 200, rows: 60 },
+      props: { title: 'clip', isFocused: true, bodyColumns, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+    })
+  const wide = await pane(80)
+  await wide.press({ key: 'player-play' })
+  await new Promise<void>(done => setTimeout(done, 50))
+  const big = (await wide.findAll({ type: 'Image' }))[0]
+  await wide.unmount()
+  const narrow = await pane(30)
+  const small = (await narrow.findAll({ type: 'Image' }))[0]
+  expect([big?.props.columns, big?.props.rows]).toEqual([80, 19])
+  expect([small?.props.columns, small?.props.rows]).toEqual([30, 7])
+  expect((small?.props.source as { png?: string }).png).toBe(RED)
+  await narrow.unmount()
+})

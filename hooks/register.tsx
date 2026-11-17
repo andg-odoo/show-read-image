@@ -883,6 +883,16 @@ async function cardsIn($: EngineInterface, calls: ReadonlyArray<ToolGroupCall>) 
 }
 
 let resizeTimer: { cancel: () => void } | undefined
+let paneSize = ''
+
+// The last size the pane reported, for checking how a resize reaches the mod
+async function notePaneSize($: EngineInterface, columns: number, rows: number) {
+  const size = `${columns}x${rows}`
+  if (size !== paneSize) {
+    paneSize = size
+    await $.fs.write(`${await homeOf($)}/.cache/show-read-image/pane.txt`, `${size}\n`).catch(() => undefined)
+  }
+}
 let wantedBox: { width: number; height: number } | undefined
 
 // The Expand pane for a video: its filmstrip with [ play ], then live frames with pause, restart and the frame rate
@@ -893,6 +903,7 @@ async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: num
   if (playing && !p) {
     stopPlayback($)
   }
+  void notePaneSize($, columns, rows)
   const box = playerBox(columns, rows, cellWidth, cell, 3)
   const start = async (from: number, size = box) => {
     const source = await playbackSource($, video, size, from, PLAYER_FPS, await convertedDir($))
@@ -927,7 +938,7 @@ async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: num
     ? <Button key="player-pause" label="pause" onPress={() => pausePlayback($)} />
     : <Button key="player-play" label="play" onPress={() => void start(p && p.status === 'paused' ? p.position : 0)} />
   return (
-    <Box flexDirection="column" width={columns}>
+    <Box flexDirection="column">
       {frame
         ? <Image key={PLAYER_KEY} source={{ png: frame }} columns={cells.columns} rows={cells.rows} alt={`[video: ${label}]`} />
         : <Image key={`player-strip-${cells.columns}x${cells.rows}`} source={{ png: strip }} columns={cells.columns} rows={cells.rows} alt={`[video: ${label}]`} />}
@@ -1071,7 +1082,7 @@ export const register: Register = on => {
           ]
         : []
     return (
-      <Box flexDirection="column" width={e.props.bodyColumns}>
+      <Box flexDirection="column">
         <Image key={`pane-${shown.hash.slice(0, 8)}-${cells.columns}x${cells.rows}`} source={{ png: base64 }} columns={cells.columns} rows={cells.rows} alt={`[image: ${shown.label}]`} />
         {Controls(
           ui,
