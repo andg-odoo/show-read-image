@@ -107,6 +107,12 @@ export function cellSizeOf(winsize: string): { width: number; height: number } |
   return shape >= 1 && shape <= 4 ? size : undefined
 }
 
+// `tmux display -p '#{client_cell_width} #{client_cell_height}'`, for when the pane's tty can't be asked
+export function cellFromTmux(text: string): { width: number; height: number } | undefined {
+  const [width = 0, height = 0] = text.trim().split(/\s+/).map(Number)
+  return width > 0 && height > 0 && height / width >= 1 && height / width <= 4 ? { width, height } : undefined
+}
+
 export function cellOf(winsize: string): number | undefined {
   const size = cellSizeOf(winsize)
   return size && size.height / size.width

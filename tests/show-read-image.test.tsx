@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { addVersion, cellOf, commandKind, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+import { addVersion, cellFromTmux, cellOf, commandKind, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
 
 // The test runtime has timers; the mod's lib leaves them out
 declare const setTimeout: (done: () => void, ms: number) => unknown
@@ -57,6 +57,8 @@ test('the cell shape comes from the tty and falls back to 2:1', () => {
   expect(cellOf('50 200 0 0')).toBeUndefined()
   expect(cellOf('')).toBeUndefined()
   expect(cellOf('50 200 200 5000')).toBeUndefined()
+  expect(cellFromTmux('10 21\n')).toEqual({ width: 10, height: 21 })
+  expect(cellFromTmux('0 0')).toBeUndefined()
   // A taller cell needs fewer rows for the same picture
   expect(fit({ width: 1000, height: 1000 }, 40, 100)).toEqual({ columns: 40, rows: 20 })
   expect(fit({ width: 1000, height: 1000 }, 40, 100, 2.5)).toEqual({ columns: 40, rows: 16 })
@@ -233,13 +235,18 @@ test('a screenshot a Bash command wrote draws under its row, marked as not read'
     return { value: undefined }
   })
   on('fs.stat', (_, e) => {
-    if (e.path !== '/tmp/s.png') {
+    if (e.path !== '/tmp/s.png' && e.path !== '/tmp/old.png') {
       throw new Error('ENOENT')
     }
-    return { value: { kind: 'file' as const, size: 90, mtimeMs: 1, isLink: false } }
+    // old.png was there before the command ran
+    const mtimeMs = e.path === '/tmp/old.png' ? 1 : Date.UTC(2026, 10, 17, 12)
+    return { value: { kind: 'file' as const, size: 90, mtimeMs, isLink: false } }
   })
   on('fs.read', (_, e) => (e.path === '/tmp/s.png' ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
-  on('tool.call', () => ({ result: 'ok', text: 'Wrote screenshot to: /tmp/s.png' }))
+  on('tool.call', (_, e) => {
+    const command = String((e as unknown as { command?: string }).command ?? '')
+    return { result: 'ok', text: command.includes('screenshot') ? 'Wrote screenshot to: /tmp/s.png' : '' }
+  })
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>engine row</Text>
@@ -262,6 +269,19 @@ test('a screenshot a Bash command wrote draws under its row, marked as not read'
   expect(image).toBeDefined()
   expect((await ui.find({ type: 'Text', text: /not read by the agent/ }))?.text).toContain('8×4')
   await ui.unmount()
+
+  await $.tool.call({ tool: 'Bash', command: 'sips -Z 64 /tmp/old.png', tool_use_id: 'bash-2' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  const stale = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'bash-2',
+    viewport: { columns: 120, rows: 40 },
+    props: { tool_use_id: 'bash-2', tool: 'Bash', input: { command: 'x' }, isRunning: false, isErrored: false, isInterrupted: false, output: 'ok' },
+  })
+  expect(await stale.findAll({ type: 'Image' })).toHaveLength(0)
+  await stale.unmount()
 })
 
 test('show_images draws a titled, unread card and can step back a version', async ($, on) => {
@@ -355,7 +375,7 @@ test('a tool card still draws after its path has kept ten newer versions, and Gl
     if (e.path !== '/tmp/s.png') {
       throw new Error('ENOENT')
     }
-    return { value: { kind: 'file' as const, size: 90, mtimeMs: edits, isLink: false } }
+    return { value: { kind: 'file' as const, size: 90, mtimeMs: Date.UTC(2026, 10, 17, 12) + edits, isLink: false } }
   })
   on('fs.read', (_, e) => (e.path === '/tmp/s.png' ? { value: { base64: content } } : { value: written.get(e.path) ?? '' }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))

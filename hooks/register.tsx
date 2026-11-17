@@ -4,11 +4,10 @@ import type { Elements, EngineInterface, Register, ToolGroupCall } from 'claude-
 import type { ShowReadImageCard, ShowReadImageCardShot, ShowReadImageHistory, ShowReadImageMode, ShowReadImageView } from '../types'
 import {
   COMPACT,
-  DEFAULT_CELL,
-  DEFAULT_CELL_WIDTH,
   EXPANDED,
   WIDE,
   addVersion,
+  cellFromTmux,
   cellSizeOf,
   fingerprint,
   fit,
@@ -57,6 +56,8 @@ const SKIP_TOOLS = /^(Read|Glob|Grep|LS|Edit|MultiEdit|Write|NotebookRead|Notebo
 const UNREAD = 'not read by the agent'
 // The session's tty size in cells and pixels; a hook process has no tty of its own, so it opens /dev/tty
 const WINSIZE = `perl -e 'open(T, "</dev/tty") or exit 1; my $w = " " x 8; ioctl(T, ($^O eq "darwin" ? 0x40087468 : 0x5413), $w) or exit 1; print join(" ", unpack("S4", $w))'`
+// Andrew's Ghostty font, measured in tmux 3.4; used only when the terminal can't be asked
+const FALLBACK_CELL = { width: 10, height: 21 }
 const MAX_PNG = 2 * 1024 * 1024
 const UNKNOWN = { width: 16, height: 10 }
 const MODES: { mode: ShowReadImageMode; label: string }[] = [
@@ -72,8 +73,8 @@ const mates = new Map<string, string[]>()
 const versionBytes = new Map<string, string>()
 const diskBytes = new Map<string, { mtimeMs: number; base64: string }>()
 let home: string | undefined
-let cell = DEFAULT_CELL
-let cellWidth = DEFAULT_CELL_WIDTH
+let cell = FALLBACK_CELL.height / FALLBACK_CELL.width
+let cellWidth = FALLBACK_CELL.width
 let viewRows = 40
 const MAX_CACHED = 24
 
@@ -86,6 +87,22 @@ function remember<K, V>(map: Map<K, V>, key: K, value: V) {
   }
 }
 let measuredFor = ''
+let measuredOnce: string | undefined
+
+// The pane's tty through /dev/tty; a hook's process may have none (seen in tmux on Linux), so tmux is asked next
+async function askCell($: EngineInterface): Promise<{ size: { width: number; height: number }; from: string } | undefined> {
+  const ran = await $.process.run(['sh', '-c', WINSIZE]).catch(() => undefined)
+  const own = ran?.exitCode === 0 ? cellSizeOf(ran.stdout) : undefined
+  if (own) {
+    return { size: own, from: 'tty' }
+  }
+  if (!(await $.env.get('TMUX').catch(() => undefined))) {
+    return undefined
+  }
+  const tmux = await $.process.run(['tmux', 'display', '-p', '#{client_cell_width} #{client_cell_height}']).catch(() => undefined)
+  const asked = tmux?.exitCode === 0 ? cellFromTmux(tmux.stdout) : undefined
+  return asked && { size: asked, from: 'tmux' }
+}
 
 // Once per viewport size: the cell shape changes with the font, not with every draw
 async function measure($: EngineInterface, viewport: { columns: number; rows: number } | undefined) {
@@ -95,10 +112,15 @@ async function measure($: EngineInterface, viewport: { columns: number; rows: nu
   }
   measuredFor = key
   viewRows = viewport?.rows ?? viewRows
-  const ran = await $.process.run(['sh', '-c', WINSIZE]).catch(() => undefined)
-  const size = ran?.exitCode === 0 ? cellSizeOf(ran.stdout) : undefined
-  const next = size ? size.height / size.width : DEFAULT_CELL
-  const width = size?.width ?? DEFAULT_CELL_WIDTH
+  const found = await askCell($)
+  const size = found?.size ?? FALLBACK_CELL
+  const next = size.height / size.width
+  const width = size.width
+  if (measuredOnce !== (found?.from ?? 'fallback')) {
+    measuredOnce = found?.from ?? 'fallback'
+    const log = `${await homeOf($)}/.cache/show-read-image/cell.txt`
+    await $.fs.write(log, `${measuredOnce} ${size.width}x${size.height}\n`).catch(() => undefined)
+  }
   if (next !== cell || width !== cellWidth) {
     cell = next
     cellWidth = width
@@ -117,8 +139,8 @@ function hashFor(id: string, base64: string) {
 }
 
 async function homeOf($: EngineInterface) {
-  home ??= (await $.env.get('HOME')) ?? '/tmp'
-  return home
+  home ??= await $.env.get('HOME').catch(() => undefined)
+  return home ?? '/tmp'
 }
 
 async function kept($: EngineInterface) {
@@ -486,7 +508,15 @@ async function pngOfBlock($: EngineInterface, base64: string, id: string): Promi
 }
 
 // Keeps what a tool call produced as versions under the call's id, so its row can draw them later
-async function collect($: EngineInterface, id: string, tool: string, input: Record<string, unknown>, result: unknown, text: string) {
+async function collect(
+  $: EngineInterface,
+  id: string,
+  tool: string,
+  input: Record<string, unknown>,
+  result: unknown,
+  text: string,
+  startedAt: number,
+) {
   const short = tool.split('__').pop() ?? tool
   const shots: ShowReadImageCardShot[] = []
   const blocks = imageBlocks(result)
@@ -505,6 +535,11 @@ async function collect($: EngineInterface, id: string, tool: string, input: Reco
     const command = tool === 'Bash' && typeof input.command === 'string' ? input.command : undefined
     const base = command ? await $.session.cwd().catch(() => '/') : '/'
     for (const path of imagePathsIn(text, command, base, await homeOf($))) {
+      // Only what this call wrote: a path it merely mentioned keeps its older modification time
+      const stat = await $.fs.stat(path).catch(() => undefined)
+      if (!stat || stat.mtimeMs < startedAt - 1000) {
+        continue
+      }
       const base64 = await pngOfFile($, path)
       if (base64) {
         await record($, path, base64)
@@ -677,12 +712,13 @@ export const register: Register = on => {
 
   // Images any other tool produced: inline blocks, or image files it printed or, for an image-making command, named
   on('tool.call', async ($, e, next) => {
+    const startedAt = await $.clock.now()
     const ran = await next(e)
     try {
       const tool = String(e.tool)
       if (!SKIP_TOOLS.test(tool) && ran.deny === undefined && ran.isError !== true) {
         const input = e as unknown as Record<string, unknown>
-        void collect($, e.tool_use_id, tool, input, ran.result, ran.text ?? '').catch(() => undefined)
+        void collect($, e.tool_use_id, tool, input, ran.result, ran.text ?? '', startedAt).catch(() => undefined)
       }
     } catch {
       // The tool already ran; its result stands whatever happens to the card
