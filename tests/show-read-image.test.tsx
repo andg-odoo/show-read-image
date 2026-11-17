@@ -961,5 +961,7 @@ test('a playing video shrinks with its pane', async ($, on) => {
   expect([big?.props.columns, big?.props.rows]).toEqual([80, 19])
   expect([small?.props.columns, small?.props.rows]).toEqual([30, 7])
   expect((small?.props.source as { png?: string }).png).toBe(RED)
+  // A new size is a new Image, not frames swapped into the old one
+  expect(small?.key).not.toBe(big?.key)
   await narrow.unmount()
 })

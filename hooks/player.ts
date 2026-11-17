@@ -4,8 +4,16 @@ import { parseFrameLine } from './logic'
 
 // Plays a video into one keyed Image in the Expand pane: frames come from a helper and are blitted as they arrive,
 // keeping only the newest, so a slow terminal drops frames instead of falling behind
-export const PLAYER_KEY = 'pane-video'
 export const PLAYER_FPS = 20
+
+// The player's Image is keyed by its size, so a resized pane mounts a new one instead of swapping frames into the
+// old size; frames go to whichever key the pane drew last
+let imageKey = 'pane-video'
+
+export function playerKey(columns: number, rows: number) {
+  imageKey = `pane-video-${columns}x${rows}`
+  return imageKey
+}
 
 type Child = HookStream<ProcessSpawnChunk, ProcessSpawnResult>
 
@@ -48,7 +56,7 @@ async function pump($: EngineInterface, p: Playback, paneId: string) {
   p.isBlitting = true
   const png = p.pending
   p.pending = undefined
-  const result = await $.ui.blit({ requestId: paneId, key: PLAYER_KEY, source: { png } }).catch((error: unknown) => ({ deny: String(error) }))
+  const result = await $.ui.blit({ requestId: paneId, key: imageKey, source: { png } }).catch((error: unknown) => ({ deny: String(error) }))
   if ('deny' in result && result.deny) {
     p.dropped += 1
   } else {

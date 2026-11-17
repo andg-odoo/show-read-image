@@ -35,7 +35,7 @@ import {
 } from './logic'
 import type { PngFile } from './logic'
 import { converter, filmstrip, openExternally, playbackSource, toPng, writeBytes } from './platform'
-import { PLAYER_FPS, PLAYER_KEY, current as currentPlayback, pause as pausePlayback, play, stop as stopPlayback } from './player'
+import { PLAYER_FPS, current as currentPlayback, playerKey, pause as pausePlayback, play, stop as stopPlayback } from './player'
 
 type Ui = Elements['terminal']
 type Box = { columns: number; rows: number }
@@ -903,7 +903,6 @@ async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: num
   if (playing && !p) {
     stopPlayback($)
   }
-  void notePaneSize($, columns, rows)
   const box = playerBox(columns, rows, cellWidth, cell, 3)
   const start = async (from: number, size = box) => {
     const source = await playbackSource($, video, size, from, PLAYER_FPS, await convertedDir($))
@@ -940,7 +939,7 @@ async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: num
   return (
     <Box flexDirection="column">
       {frame
-        ? <Image key={PLAYER_KEY} source={{ png: frame }} columns={cells.columns} rows={cells.rows} alt={`[video: ${label}]`} />
+        ? <Image key={playerKey(cells.columns, cells.rows)} source={{ png: frame }} columns={cells.columns} rows={cells.rows} alt={`[video: ${label}]`} />
         : <Image key={`player-strip-${cells.columns}x${cells.rows}`} source={{ png: strip }} columns={cells.columns} rows={cells.rows} alt={`[video: ${label}]`} />}
       {Controls(
         ui,
@@ -1057,6 +1056,7 @@ export const register: Register = on => {
     if (!shown || !base64) {
       return <Text dimColor>Nothing to show: press ⤢ on a picture.</Text>
     }
+    void notePaneSize($, e.props.bodyColumns, e.props.scroll.bodyRows)
     if (shown.video) {
       return drawPlayer($, ui, e.props.bodyColumns, e.props.scroll.bodyRows, shown.video, shown.label, base64)
     }
