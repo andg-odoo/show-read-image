@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { addVersion, cellFromTmux, cellOf, commandKind, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+import { addVersion, cellFromTmux, cellOf, commandKind, isVideoPath, longestGap, sampleTimes, samplesRow, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
 
 // The test runtime has timers; the mod's lib leaves them out
 declare const setTimeout: (done: () => void, ms: number) => unknown
@@ -631,4 +631,104 @@ test('a Read whose PNG is over 2 MiB is converted from the file on disk', async 
   expect((await row.findAll({ type: 'Image' })).map(found => (found.props.source as { png?: string }).png)).toEqual([RED])
   expect(await row.find({ type: 'Text', text: /1206×2622/ })).toBeDefined()
   await row.unmount()
+})
+
+test('a video is summed up by its length, frame count and longest gap between frames', () => {
+  expect(isVideoPath('/t/rec.MOV')).toBe(true)
+  expect(isVideoPath('/t/shot.png')).toBe(false)
+  expect(longestGap([0, 0.5, 2.1, 2.2])).toEqual({ gap: 1.6, gapAt: 2.1 })
+  expect(longestGap([])).toEqual({ gap: 0, gapAt: 0 })
+  expect(videoNote({ duration: 9.6, frames: 159, gap: 1.615, gapAt: 1.61 })).toBe('9.60 s · 159 frames · longest gap 1.61 s at 1.61 s')
+  expect(stripLayout(1206, 2622)).toEqual({ columns: 4, rows: 2, cellHeight: 480 })
+  expect(stripLayout(1920, 1080)).toEqual({ columns: 2, rows: 4, cellHeight: 270 })
+  expect(imagePathsIn('Recording saved to /tmp/rec.mov')).toEqual(['/tmp/rec.mov'])
+  expect(samplesRow(sampleTimes(5, 8, false))).toBe('frames at 0.0 0.6 1.3 1.9 2.5 3.1 3.8 4.4 s')
+  expect(samplesRow(sampleTimes(120, 8, true))).toBe('frames at 7.5 22.5 37.5 52.5 67.5 82.5 97.5 112.5 s')
+  expect(samplesRow(sampleTimes(16, 8, false))).toBe('frames at 0 2 4 6 8 10 12 14 s')
+})
+
+test('show_images draws a video as its filmstrip, with its timing and an open button', async ($, on) => {
+  const written = new Map<string, string>()
+  const ran: string[][] = []
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  // A Linux machine with ffmpeg: ffprobe gives the shape, the packet times and the length
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    const line = e.argv.join(' ')
+    const stdout = line === 'uname -s'
+      ? 'Linux\n'
+      : line.includes('command -v') ? '/usr/bin/x\n'
+      : line.includes('stream=width,height') ? '1206,2622\n'
+      : line.includes('packet=pts_time') ? '0\n0.5\n2.1\n2.2\n'
+      : line.includes('format=duration') ? '2.5\n'
+      : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/clip.mov' || e.path.endsWith('-strip.png')) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 5, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => (e.path.endsWith('-strip.png') ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  const result = await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'vid', images: [{ path: '/s/clip.mov' }] })
+  expect(String(result.result)).toContain('Shown 1 image(s)')
+  expect(ran.some(argv => argv[0] === 'ffmpeg' && argv.join(' ').includes('tile=4x2'))).toBe(true)
+  const card = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'vid',
+    viewport: { columns: 120, rows: 40 },
+    props: { tool_use_id: 'vid', tool: 'mcp__show-read-image__show_images', input: {}, isRunning: false, isErrored: false, isInterrupted: false, output: '' },
+  })
+  expect(await card.find({ type: 'Text', text: /2\.50 s · 4 frames · longest gap 1\.60 s at 2\.10 s/ })).toBeDefined()
+  expect(await card.find({ type: 'Text', text: 'frames at 0.0 0.3 0.6 0.9 1.3 1.6 1.9 2.2 s' })).toBeDefined()
+  await card.press({ key: 'vid-open' })
+  expect(ran.some(argv => argv[0] === 'xdg-open' && argv[1] === '/s/clip.mov')).toBe(true)
+  await card.unmount()
+})
+
+test('a video over a minute is sampled by seeking to each frame, not decoded whole', async ($, on) => {
+  const ran: string[][] = []
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', () => ({ value: undefined }))
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    const line = e.argv.join(' ')
+    const stdout = line === 'uname -s'
+      ? 'Linux\n'
+      : line.includes('command -v') ? '/usr/bin/x\n'
+      : line.includes('stream=width,height') ? '1920,1080\n'
+      : line.includes('packet=pts_time') ? '0\n1\n2\n'
+      : line.includes('format=duration') ? '600\n'
+      : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/long.mov' || e.path.endsWith('-strip.png')) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 5, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => ({ value: e.path.endsWith('-strip.png') ? { base64: RED } : '' }))
+  await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'long', images: [{ path: '/s/long.mov' }] })
+  const ffmpeg = ran.filter(argv => argv[0] === 'ffmpeg')
+  expect(ffmpeg.filter(argv => argv.includes('-ss')).map(argv => argv[argv.indexOf('-ss') + 1])).toEqual([
+    '37.500', '112.500', '187.500', '262.500', '337.500', '412.500', '487.500', '562.500',
+  ])
+  expect(ffmpeg.some(argv => argv.join(' ').includes('fps='))).toBe(false)
+  expect(ffmpeg.at(-1)?.join(' ')).toContain('tile=2x4')
 })
