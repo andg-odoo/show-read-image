@@ -1,15 +1,34 @@
 # show-read-image
 
-A Claude Code mod that draws the PNGs the Read tool opens inline in the transcript, under the Read row.
+A Claude Code mod that draws images inline in the transcript, under the tool call that made them.
 
-- Several images read in one group are drawn side by side, each framed with its name.
-- `x.before.png` and `x.after.png` read together are drawn as a pair, with a toggle for both, after only or before only.
-- Each re-read of a path whose content changed is kept as a new version (the last 10), so you can step back through
-  earlier shots of the same file. Versions are stored under `~/.cache/show-read-image/`.
-- Shots whose aspect ratios differ by more than 10% get a warning, since they are not comparable.
+- **Reads.** The PNGs the Read tool opens. Several read in one group are drawn side by side, each framed with its name.
+- **Other tools.** Images any other tool produced: inline image blocks, as MCP servers return them, and image files
+  a command printed and wrote during the call. Listing and search commands (`ls`, `find`, `rg`, `git status`, …) are
+  ignored, and a call draws at most four images. A command that writes an image without printing its path draws
+  nothing; Read it, or show it with `show_images`.
+- **`show_images` tool.** A deferred tool that shows image files without the agent loading them, with a title, labels
+  and `version: -1` for the previous version of a path.
+- **Marked when unread.** Any card drawn from a file the agent never loaded says "not read by the agent", so it is
+  never taken as what the agent saw.
+- **Before/after pairs.** `x.before.png` and `x.after.png` read together are drawn as a pair, with a toggle for both,
+  after only or before only.
+- **Versions.** Each new content of a path is kept as a version (the last 10), under `~/.cache/show-read-image/`.
+  A picture with history has two views: Now, with ◀ ▶ to step back, and Side by side, with the newest six.
+- **Aspect warning.** Shots whose aspect ratios differ by more than 10% get a warning, since they are not comparable.
+- **One way to compare.** A card with several images has `[ side by side ] [ A only ] [ B only ]` for two, and
+  `[ all ] [ vs B ] [ vs C ] …` for more, each beside the first.
+- **Size.** Pictures are sized from the terminal's measured cells. Small ones draw up to twice their pixels (2× under
+  400 px, tapering to 1× at 800), larger ones at their own size, never narrower than 16 columns, and within 60% of
+  the visible rows.
+- **No duplicates.** A command's card is not drawn once a later Read shows the same picture.
 
-Verified in Ghostty inside tmux, without `CLAUDE_CODE_FORCE_TERMINAL_IMAGES`. A session hosted by a background
-pty host sees no terminal image support and draws the `[image: ...]` alt text instead.
+JPEGs, and PNGs over the 2 MiB an image may take, are converted and scaled down with whichever of `sips`, `magick`,
+`convert` or `ffmpeg` the machine has. Without one of them, those images get no card.
+
+Verified in Ghostty inside tmux, without `CLAUDE_CODE_FORCE_TERMINAL_IMAGES`. A session hosted by `claude bg-pty-host`
+sees `TERM=xterm-256color` with no tmux or terminal variables, so it draws the `[image: ...]` alt text instead. Resume
+the session in the tmux pane itself to get pictures.
 
 ## Install
 
