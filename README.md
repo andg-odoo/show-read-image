@@ -16,6 +16,8 @@ A Claude Code mod that draws images inline in the transcript, under the tool cal
 - **Versions.** Each new content of a path is kept as a version (the last 10), under `~/.cache/show-read-image/`.
   A picture with history has two views: Now, with ◀ ▶ to step back, and Side by side, with the newest six.
 - **Aspect warning.** Shots whose aspect ratios differ by more than 10% get a warning, since they are not comparable.
+- **Expand.** ⤢ on any picture opens it in a pane beside the chat, as large as the pane allows, with ◀ ▶ through
+  its versions when it has any.
 - **One way to compare.** A card with several images has `[ side by side ] [ A only ] [ B only ]` for two, and
   `[ all ] [ vs B ] [ vs C ] …` for more, each beside the first.
 - **Size.** Pictures are sized from the terminal's measured cells. Small ones draw up to twice their pixels (2× under

@@ -1,7 +1,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register, ToolGroupCall } from 'claude-code'
 
-import type { ShowReadImageCard, ShowReadImageCardShot, ShowReadImageHistory, ShowReadImageMode, ShowReadImageView } from '../types'
+import type { ShowReadImageCard, ShowReadImageCardShot, ShowReadImageExpanded, ShowReadImageHistory, ShowReadImageMode, ShowReadImageView } from '../types'
 import {
   COMPACT,
   EXPANDED,
@@ -34,7 +34,7 @@ import { toPng, writeBytes } from './platform'
 type Ui = Elements['terminal']
 type Box = { columns: number; rows: number }
 type Size = { width: number; height: number }
-type Shot = { title: string; meta: string; base64: string; size: Size }
+type Shot = { title: string; meta: string; base64: string; size: Size; key?: string }
 type Read = { id: string; path: string; file: PngFile }
 type Pic = { base64: string; size: Size }
 type Pair = { stem: string; hint: string; before: Pic; after: Pic }
@@ -48,6 +48,10 @@ const pick = atom({ plugin: 'show-read-image', key: 'pick' } as const, -1)
 // When each `path#hash` was last shown by a Read, so a command's card for the same picture can fold away
 const seen = atom({ plugin: 'show-read-image', key: 'seen' } as const, {} as Record<string, number>, { shape: 'seen-1' })
 const MAX_SEEN = 500
+const PANE = 'show-read-image'
+// The picture the Expand pane shows; its bytes stay in memory, or come from the history store by `key`
+const expanded = atom({ plugin: 'show-read-image', key: 'expanded' } as const, null as ShowReadImageExpanded | null, { shape: 'expanded-1' })
+const expandedBytes = new Map<string, string>()
 const cards = atom({ plugin: 'show-read-image', key: 'cards' } as const, {} as Record<string, ShowReadImageCard>, { shape: 'cards-1' })
 
 const MIN_FRAME = 30
@@ -239,7 +243,7 @@ function hintOf(path: string) {
   return dir ? `${splitPath(dir).name}/` : ''
 }
 
-type FrameAt = { title: string; hint?: string; meta: string; width: number; controls?: number; max: number }
+type FrameAt = { title: string; hint?: string; meta: string; width: number; controls?: number; max: number; actions?: JSX.Element[] }
 
 // Bracketed buttons draw as `[ label ]`, one column apart
 function buttonsWidth(labels: string[]) {
@@ -248,7 +252,7 @@ function buttonsWidth(labels: string[]) {
 
 // As wide as its widest line, picture, header or controls, so none of them is crushed; pictures keep their own size
 function frameWidth(at: FrameAt) {
-  const header = at.title.length + (at.hint ? at.hint.length + 1 : 0) + 2 + at.meta.length
+  const header = at.title.length + (at.hint ? at.hint.length + 1 : 0) + 2 + at.meta.length + (at.actions?.length ?? 0) * 2
   return Math.min(at.max, Math.max(MIN_FRAME, at.width, header, at.controls ?? 0))
 }
 
@@ -266,6 +270,24 @@ function Controls(ui: Ui, ...groups: JSX.Element[][]) {
   )
 }
 
+// Opens the Expand pane on this picture; `key` lets it step through the picture's versions
+function ExpandButton($: EngineInterface, ui: Ui, id: string, label: string, base64: string, key?: string) {
+  const hash = hashOf(base64)
+  return (
+    <ui.Button
+      key={`${id}-expand`}
+      plain
+      label="⤢"
+      dimColor
+      onPress={async () => {
+        remember(expandedBytes, hash, base64)
+        await update($, expanded, () => (key ? { label, hash, key } : { label, hash }))
+        await $.ui.open({ id: PANE, title: label })
+      }}
+    />
+  )
+}
+
 // The rounded dim border with its title bar: bold title, dim folder hint, dim meta on the right
 function Frame(ui: Ui, at: FrameAt, ...body: JSX.Element[]) {
   const { Box, Text } = ui
@@ -276,7 +298,10 @@ function Frame(ui: Ui, at: FrameAt, ...body: JSX.Element[]) {
           <Text bold wrap="truncate-end">{at.title}</Text>
           {at.hint ? <Text dimColor wrap="truncate-start">{at.hint}</Text> : null}
         </Box>
-        <Text dimColor wrap="truncate-end">{at.meta}</Text>
+        <Box flexDirection="row" gap={1} flexShrink={0}>
+          <Text dimColor wrap="truncate-end">{at.meta}</Text>
+          {at.actions ?? null}
+        </Box>
       </Box>
       {body}
     </Box>
@@ -284,7 +309,7 @@ function Frame(ui: Ui, at: FrameAt, ...body: JSX.Element[]) {
 }
 
 // Pictures packed into rows, each with a small title over it
-function Panes(ui: Ui, id: string, shots: Shot[], box: Box, minRows: number, perRow: number) {
+function Panes($: EngineInterface, ui: Ui, id: string, shots: Shot[], box: Box, minRows: number, perRow: number) {
   const { Box, Text, Image } = ui
   const natives = shots.map(shot => nativeColumns(shot.size.width, cellWidth))
   const rows = pack(shots.map(shot => shot.size.width / shot.size.height), box.columns, box.rows, minRows, perRow, 2, cell, natives)
@@ -295,12 +320,15 @@ function Panes(ui: Ui, id: string, shots: Shot[], box: Box, minRows: number, per
         <Box key={`${id}-row-${r}`} flexDirection="row" gap={2}>
           {row.map(slot => {
             const shot = shots[slot.index]!
-            const hasMeta = slot.columns >= shot.title.length + shot.meta.length + 1
+            const hasMeta = slot.columns >= shot.title.length + shot.meta.length + 3
             return (
               <Box key={`${id}-pane-${slot.index}`} flexDirection="column" width={slot.columns}>
                 <Box flexDirection="row" justifyContent="space-between" gap={1}>
                   <Text bold wrap="truncate-end">{shot.title}</Text>
-                  {hasMeta ? <Text dimColor>{shot.meta}</Text> : null}
+                  <Box flexDirection="row" gap={1} flexShrink={0}>
+                    {hasMeta ? <Text dimColor>{shot.meta}</Text> : null}
+                    {ExpandButton($, ui, `${id}-pane-${slot.index}`, shot.title, shot.base64, shot.key)}
+                  </Box>
                 </Box>
                 <Image
                   key={`${id}-img-${slot.index}-${slot.columns}x${slot.rows}-${fingerprint(shot.base64).slice(0, 8)}`}
@@ -339,7 +367,7 @@ async function drawPair($: EngineInterface, ui: Ui, requestId: string, pair: Pai
     ...(shown !== 'before' ? [shot('After', pair.after)] : []),
   ]
   // Keyed by the drawing's own id: a group can hold this pair twice, from a Read and from the command that made it
-  const panes = Panes(ui, `${requestId}-${pair.stem}`, sides, box, 1, 2)
+  const panes = Panes($, ui, `${requestId}-${pair.stem}`, sides, box, 1, 2)
   const meta = ['before | after', sizeWarning(pair.before.size, pair.after.size)].filter(Boolean).join(' · ')
   const controls = Controls(
     ui,
@@ -414,7 +442,7 @@ async function drawRead(
       alt={`[image: ${stem}]`}
     />
   )
-  const frame: FrameAt = { title: stem, hint: hintOf(path), meta, width: cells.columns, max: box.columns }
+  const frame: FrameAt = { title: stem, hint: hintOf(path), meta, width: cells.columns, max: box.columns, actions: [ExpandButton($, ui, requestId, stem, base64, path || undefined)] }
   if (!hasHistory) {
     return Frame(ui, frame, image)
   }
@@ -437,10 +465,10 @@ async function drawRead(
       const bytes = i === ownAt ? file.base64 : one.slot < 0 ? undefined : await readVersion($, path, one.slot, one.hash)
       if (bytes) {
         const pic = i === ownAt ? picOf(file) : diskPic(bytes)
-        shots.push(shot(i === ownAt ? 'Now' : `v${i + 1}`, pic))
+        shots.push({ ...shot(i === ownAt ? 'Now' : `v${i + 1}`, pic), key: path })
       }
     }
-    const panes = Panes(ui, `${requestId}-side`, shots, wide(columns), 6, 3)
+    const panes = Panes($, ui, `${requestId}-side`, shots, wide(columns), 6, 3)
     const note = first > 0 ? <Text dimColor>{`${first} older version(s) not shown`}</Text> : null
     return Frame(
       ui,
@@ -682,7 +710,7 @@ async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadIm
           ...pictures.map((one, i) => (isPair ? chip(i, `${one.shot.label} only`) : i === 0 ? null : chip(i, `vs ${one.shot.label}`))),
         ].filter(one => one !== null)
   const shown = at < 0 ? pictures : isPair ? [pictures[at]!] : [pictures[0]!, pictures[at]!]
-  const panes = Panes(ui, `${id}-card`, shown.map(one => shot(one.shot.label, diskPic(one.base64))), wide(columns), 6, isPair || at >= 0 ? 2 : 3)
+  const panes = Panes($, ui, `${id}-card`, shown.map(one => shot(one.shot.label, diskPic(one.base64))), wide(columns), 6, isPair || at >= 0 ? 2 : 3)
   const meta = [pictures.some(one => one.shot.isUnread) ? UNREAD : '', pictures.length > 1 ? `${pictures.length} images` : pixels(diskPic(only.base64).size)]
     .filter(Boolean)
     .join(' · ')
@@ -783,6 +811,53 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // Expand: the picture as large as the pane allows, enlarged if need be, which is the point of opening it
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (e.surface !== 'terminal') {
+      return next(e)
+    }
+    const ui = $.ui.resolve(e)
+    const { Box, Button, Image, Text } = ui
+    const shown = await read($, expanded)
+    const versions = shown?.key ? ((await kept($))[shown.key]?.versions ?? []) : []
+    const base64 = shown
+      ? (expandedBytes.get(shown.hash) ?? (shown.key ? await readVersion($, shown.key, -1, shown.hash) : undefined))
+      : undefined
+    if (!shown || !base64) {
+      return <Text dimColor>Nothing to show: press ⤢ on a picture.</Text>
+    }
+    const size = pngSize(base64) ?? UNKNOWN
+    const cells = fit(size, e.props.bodyColumns, Math.max(4, e.props.scroll.bodyRows - 2), cell)
+    const at = versions.findIndex(one => one.hash === shown.hash)
+    const step = (by: number) => async () => {
+      const to = versions[at + by]
+      const bytes = to && shown.key ? await readVersion($, shown.key, to.slot, to.hash) : undefined
+      if (to && bytes) {
+        remember(expandedBytes, to.hash, bytes)
+        await update($, expanded, () => ({ ...shown, hash: to.hash }))
+      }
+    }
+    const stepper =
+      at >= 0 && versions.length > 1
+        ? [
+            <Button key="pane-prev" plain label="◀" dimColor={at === 0} onPress={step(-1)} />,
+            <Text key="pane-at">{`v${at + 1}/${versions.length}`}</Text>,
+            <Button key="pane-next" plain label="▶" dimColor={at === versions.length - 1} onPress={step(1)} />,
+          ]
+        : []
+    return (
+      <Box flexDirection="column" width={e.props.bodyColumns}>
+        <Image key={`pane-${shown.hash.slice(0, 8)}-${cells.columns}x${cells.rows}`} source={{ png: base64 }} columns={cells.columns} rows={cells.rows} alt={`[image: ${shown.label}]`} />
+        {Controls(
+          ui,
+          [<Text key="pane-label" bold>{shown.label}</Text>, <Text key="pane-size" dimColor>{pixels(size)}</Text>],
+          ...(stepper.length > 0 ? [stepper] : []),
+          [<Button key="pane-close" label="close" dimColor onPress={() => $.ui.close({ id: PANE })} />],
+        )}
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const reads = readsOf(e.props.calls)
     for (const one of reads) {
@@ -831,7 +906,7 @@ export const register: Register = on => {
       trees.push(await drawRead($, ui, rest[0]!.id, rest[0]!.path, rest[0]!.file, columns))
     } else if (rest.length > 1) {
       const shots = rest.map(one => shot(splitPath(one.path).stem, picOf(one.file)))
-      const panes = Panes(ui, 'gallery', shots, wide(columns), 6, 2)
+      const panes = Panes($, ui, 'gallery', shots, wide(columns), 6, 2)
       const hints = [...new Set(rest.map(one => hintOf(one.path)))]
       const at = { title: `${shots.length} images`, hint: hints.length === 1 ? hints[0] : undefined, meta: `${rest.length} reads` }
       trees.push(Frame(ui, { ...at, width: panes.width, max: wide(columns).columns }, panes.tree))
