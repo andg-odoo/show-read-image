@@ -1,6 +1,6 @@
 import type { EngineInterface } from 'claude-code'
 
-import { SEEK_ABOVE_SECONDS, longestGap, sampleTimes, stripLayout } from './logic'
+import { SEEK_ABOVE_SECONDS, longestGap, needsFfmpeg, sampleTimes, stripLayout } from './logic'
 import type { VideoStats } from './logic'
 import type { Source } from './player'
 
@@ -62,6 +62,13 @@ let stripTool: Promise<StripTool | undefined> | undefined
 async function has($: EngineInterface, name: string) {
   const ran = await $.process.run(['sh', '-c', `command -v ${name}`]).catch(() => undefined)
   return ran?.exitCode === 0 && ran.stdout.trim() !== ''
+}
+
+let ffmpegFound: Promise<boolean> | undefined
+
+export function hasFfmpeg($: EngineInterface): Promise<boolean> {
+  ffmpegFound ??= (async () => (await has($, 'ffmpeg')) && (await has($, 'ffprobe')))()
+  return ffmpegFound
 }
 
 function videoTool($: EngineInterface): Promise<StripTool | undefined> {
@@ -140,6 +147,9 @@ async function seekStrip($: EngineInterface, video: string, out: string, samples
 
 // Writes the grid to `out` and returns the clip's timing, or undefined when this machine has neither tool
 export async function filmstrip($: EngineInterface, video: string, out: string, cache: string): Promise<VideoStats | undefined> {
+  if (needsFfmpeg(video)) {
+    return (await hasFfmpeg($)) ? ffmpegStrip($, video, out) : undefined
+  }
   const tool = await videoTool($)
   if (tool === 'swift') {
     return swiftStrip($, video, out, cache)
@@ -163,7 +173,7 @@ export async function playbackSource(
   cache: string,
 ): Promise<Source | undefined> {
   const os = (await $.process.run(['uname', '-s']).catch(() => undefined))?.stdout.trim()
-  if (os === 'Darwin' && (await has($, 'clang'))) {
+  if (os === 'Darwin' && !needsFfmpeg(video) && (await has($, 'clang'))) {
     const bin = `${cache}/framestream`
     if (!(await $.fs.exists(bin))) {
       const frameworks = ['Foundation', 'AVFoundation', 'CoreMedia', 'CoreVideo', 'VideoToolbox', 'ImageIO', 'CoreGraphics'].flatMap(name => ['-framework', name])

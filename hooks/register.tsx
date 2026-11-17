@@ -18,6 +18,7 @@ import {
   isPng,
   isPngPath,
   isVideoPath,
+  needsFfmpeg,
   nativeColumns,
   pack,
   pairOf,
@@ -37,7 +38,7 @@ import {
   videoNote,
 } from './logic'
 import type { PngFile } from './logic'
-import { converter, filmstrip, openExternally, playbackSource, toPng, writeBytes } from './platform'
+import { converter, filmstrip, hasFfmpeg, openExternally, playbackSource, toPng, writeBytes } from './platform'
 import { PLAYER_FPS, current as currentPlayback, playerKey, pause as pausePlayback, play, stop as stopPlayback } from './player'
 
 type Ui = Elements['terminal']
@@ -692,7 +693,8 @@ async function stripOf($: EngineInterface, video: string): Promise<Picture | und
 // What a path draws as: a picture, or for a video its filmstrip; else why it can't be drawn
 async function pictureOf($: EngineInterface, path: string): Promise<Picture | { reason: string }> {
   if (isVideoPath(path)) {
-    return (await stripOf($, path)) ?? { reason: 'no filmstrip: needs swiftc on macOS, or ffmpeg and ffprobe' }
+    const reason = needsFfmpeg(path) && !(await hasFfmpeg($)) ? 'WebM needs ffmpeg and ffprobe' : 'no filmstrip: needs swiftc on macOS, or ffmpeg and ffprobe'
+    return (await stripOf($, path)) ?? { reason }
   }
   return convertFile($, path)
 }
@@ -943,7 +945,7 @@ type VideoAt = { note: string; path: string; site?: string; samples?: string; du
 async function startVideo($: EngineInterface, site: string, video: string, from: number, size: { width: number; height: number }) {
   const source = await playbackSource($, video, size, from, PLAYER_FPS, await convertedDir($))
   if (!source) {
-    await $.ui.toast('show-read-image: playing a video needs clang on macOS, or ffmpeg')
+    await $.ui.toast(needsFfmpeg(video) ? 'show-read-image: playing WebM needs ffmpeg' : 'show-read-image: playing a video needs clang on macOS, or ffmpeg')
     return
   }
   play($, site, video, from, size, source)

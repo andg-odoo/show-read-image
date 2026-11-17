@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { addVersion, cellFromTmux, cellOf, clockOf, commandKind, parseFrameLine, playWord, playerBox, scrubChunks, isVideoPath, longestGap, sampleTimes, samplesRow, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+import { addVersion, cellFromTmux, cellOf, clockOf, commandKind, needsFfmpeg, parseFrameLine, playWord, playerBox, scrubChunks, isVideoPath, longestGap, sampleTimes, samplesRow, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
 
 // The test runtime has timers; the mod's lib leaves them out
 declare const setTimeout: (done: () => void, ms: number) => unknown
@@ -640,6 +640,10 @@ test('a Read whose PNG is over 2 MiB is converted from the file on disk', async 
 test('a video is summed up by its length, frame count and longest gap between frames', () => {
   expect(isVideoPath('/t/rec.MOV')).toBe(true)
   expect(isVideoPath('/t/shot.png')).toBe(false)
+  expect(isVideoPath('/t/test-results/video.webm')).toBe(true)
+  expect(needsFfmpeg('/t/video.webm')).toBe(true)
+  expect(needsFfmpeg('/t/rec.mov')).toBe(false)
+  expect(imagePathsIn('video saved: /t/test-results/login/video.webm')).toEqual(['/t/test-results/login/video.webm'])
   expect(longestGap([0, 0.5, 2.1, 2.2])).toEqual({ gap: 1.6, gapAt: 2.1 })
   expect(longestGap([])).toEqual({ gap: 0, gapAt: 0 })
   expect(videoNote({ duration: 9.6, frames: 159, gap: 1.615, gapAt: 1.61 })).toBe('0:09.6 · 159 frames · longest hold 1.6 s at 0:01.6')
@@ -1052,4 +1056,40 @@ test('a video card plays in place, with a scrub bar and chapters that jump', asy
   const rest = await mount()
   expect(await rest.find({ type: 'Button', key: 'qa-play' })).toBeDefined()
   await rest.unmount()
+})
+
+test('a WebM goes to ffmpeg even on a Mac, since AVFoundation can\'t decode it', async ($, on) => {
+  const written = new Map<string, string>()
+  const ran: string[][] = []
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    const line = e.argv.join(' ')
+    const stdout = line === 'uname -s'
+      ? 'Darwin\n'
+      : line.includes('command -v') ? '/usr/bin/x\n'
+      : line.includes('stream=width,height') ? '1280,720\n'
+      : line.includes('packet=pts_time') ? '0\n0.04\n'
+      : line.includes('format=duration') ? '3\n'
+      : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('fs.exists', () => ({ value: true }))
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/video.webm' || e.path.endsWith('-strip.png')) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 7, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => (e.path.endsWith('-strip.png') ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
+  const result = await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'webm', images: [{ path: '/s/video.webm' }] })
+  expect(String(result.result)).toContain('Shown 1 image(s)')
+  expect(ran.some(argv => argv[0] === 'ffmpeg' && argv.includes('/s/video.webm'))).toBe(true)
+  expect(ran.some(argv => argv[0]!.endsWith('/filmstrip'))).toBe(false)
 })
