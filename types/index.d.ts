@@ -6,7 +6,10 @@ export type ShowReadImageMode = 'both' | 'after' | 'before'
 
 export type ShowReadImageView = 'now' | 'side'
 
-export type ShowReadImageCardShot = { key: string; label: string; hash: string; isUnread: boolean }
+export type ShowReadImageExpanded = { label: string; hash: string; key?: string; width?: number; height?: number }
+
+// `width`/`height`: the source's own size, where the bytes kept are a scaled-down copy
+export type ShowReadImageCardShot = { key: string; label: string; hash: string; isUnread: boolean; width?: number; height?: number }
 
 // `isCommand`: made by a tool or command rather than shown on purpose; it is not drawn once a later Read shows it
 export type ShowReadImageCard = { title?: string; shots: ShowReadImageCardShot[]; at?: number; isCommand?: boolean }
@@ -20,6 +23,7 @@ declare module 'claude-code' {
       view: StateFamily<ShowReadImageView>
       pick: StateFamily<number>
       seen: Shaped<Record<string, number>>
+      expanded: Shaped<ShowReadImageExpanded | null>
       cards: Shaped<Record<string, ShowReadImageCard>>
     }
   }

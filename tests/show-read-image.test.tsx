@@ -183,7 +183,7 @@ test('a mixed group draws its pair frame first, then a gallery of the rest', asy
   expect((await group.find({ type: 'Text', text: /before \| after/ }))?.text).toContain('sizes differ (8×4 vs 4×4)')
   expect(await group.find({ type: 'Text', text: '2 images' })).toBeDefined()
   expect(await group.findAll({ type: 'Image' })).toHaveLength(4)
-  expect(await group.findAll({ type: 'Button' })).toHaveLength(3)
+  expect((await group.findAll({ type: 'Button' })).filter(found => found.key?.startsWith('mode-'))).toHaveLength(3)
   await group.unmount()
 
   // In ctrl+o rows the before row draws no picture of its own
@@ -472,4 +472,163 @@ test('a command that printed the pair a group then reads draws it once', async (
   expect(await group.find({ type: 'Text', text: 'before | after' })).toBeDefined()
   expect(await group.findAll({ type: 'Image' })).toHaveLength(2)
   await group.unmount()
+})
+
+test('⤢ opens a pane that fills its room and steps through versions', async ($, on) => {
+  const written = new Map<string, string>()
+  let next = RED
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('fs.read', (_, e) => ({ value: written.get(e.path) ?? '' }))
+  on('fs.stat', () => {
+    throw new Error('ENOENT')
+  })
+  on('tool.call', () => ({ result: image(next) }))
+  const opened: string[] = []
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true as const } }
+  })
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  await $.tool.call({ tool: 'Read', file_path: '/s/shot.png' })
+  next = BLUE
+  await $.tool.call({ tool: 'Read', file_path: '/s/shot.png' })
+
+  const row = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'read-x',
+    viewport: { columns: 120, rows: 40 },
+    props: call('read-x', '/s/shot.png', BLUE),
+  })
+  await row.press({ key: 'read-x-expand' })
+  expect(opened).toEqual(['show-read-image'])
+  await row.unmount()
+
+  const pane = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'show-read-image',
+    viewport: { columns: 160, rows: 50 },
+    props: { title: 'shot', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  })
+  // An 8×4 picture enlarged to the pane's width: 80 columns by 80 × 4 / 8 / 2.1 rows, with 10×21 px cells
+  const [picture] = await pane.findAll({ type: 'Image' })
+  expect(picture?.props.columns).toBe(80)
+  expect(picture?.props.rows).toBe(19)
+  expect((picture?.props.source as { png?: string }).png).toBe(BLUE)
+  expect(await pane.find({ type: 'Text', text: 'v2/2' })).toBeDefined()
+  await pane.press({ key: 'pane-prev' })
+  expect(((await pane.findAll({ type: 'Image' }))[0]?.props.source as { png?: string }).png).toBe(RED)
+  await pane.unmount()
+})
+
+test('a Read that came back as JPEG still draws, at the file\'s own size', async ($, on) => {
+  const written = new Map<string, string>()
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  // The converter is found and writes its PNG; the converted file reads back as RED
+  on('process.run', (_, e) => ({
+    value: { exitCode: 0, stdout: e.argv.join(' ').includes('command -v sips') ? '/usr/bin/sips' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('fs.stat', (_, e) => {
+    if (!e.path.includes('/converted/')) {
+      throw new Error('ENOENT')
+    }
+    return { value: { kind: 'file' as const, size: 90, mtimeMs: Date.UTC(2026, 10, 17, 12) + 1, isLink: false } }
+  })
+  on('fs.read', (_, e) => (e.path.includes('/converted/') ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
+  on('tool.call', () => ({
+    result: { type: 'image', file: { base64: '/9j/4AAQ', type: 'image/jpeg', dimensions: { originalWidth: 1206, originalHeight: 2622 } } },
+  }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  await $.tool.call({ tool: 'Read', file_path: '/s/tall.png', tool_use_id: 'big' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  const row = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'big',
+    viewport: { columns: 120, rows: 40 },
+    props: { tool_use_id: 'big', tool: 'Read', input: { file_path: '/s/tall.png' }, isRunning: false, isErrored: false, isInterrupted: false, output: { type: 'image', file: { base64: '/9j/4AAQ', type: 'image/jpeg' } } },
+  })
+  expect((await row.findAll({ type: 'Image' })).map(found => (found.props.source as { png?: string }).png)).toEqual([RED])
+  expect(await row.find({ type: 'Text', text: /1206×2622/ })).toBeDefined()
+  expect(await row.find({ type: 'Text', text: /not read by the agent/ })).toBeUndefined()
+  await row.unmount()
+})
+
+test('a Read whose PNG is over 2 MiB is converted from the file on disk', async ($, on) => {
+  const written = new Map<string, string>()
+  const huge = `iVBORw0KGgo${'A'.repeat(3_000_000)}`
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  const converted: string[] = []
+  const madeDirs: string[] = []
+  on('process.run', (_, e) => {
+    if (e.argv[0] === 'sips') {
+      converted.push(e.argv[e.argv.length - 3]!)
+    }
+    if (e.argv[0] === 'mkdir' && converted.length === 0) {
+      madeDirs.push(e.argv[e.argv.length - 1]!)
+    }
+    return {
+      value: { exitCode: 0, stdout: e.argv.join(' ').includes('command -v sips') ? '/usr/bin/sips' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+    }
+  })
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/huge.png') {
+      return { value: { kind: 'file' as const, size: 20_000_000, mtimeMs: 1, isLink: false } }
+    }
+    if (e.path.includes('/converted/') && converted.length > 0) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 2, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => (e.path.includes('/converted/') ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
+  on('tool.call', () => ({ result: { type: 'image', file: { base64: huge, type: 'image/png', dimensions: { originalWidth: 1206, originalHeight: 2622 } } } }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  await $.tool.call({ tool: 'Read', file_path: '/s/huge.png', tool_use_id: 'huge' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  expect(converted).toEqual(['/s/huge.png'])
+  // The converter can't make its output folder, so it exists before it runs
+  expect(madeDirs).toEqual(['/home/me/.cache/show-read-image/converted'])
+  expect([...written.entries()].find(([path]) => path.endsWith('last-read.txt'))?.[1]).toContain('image/png')
+  const row = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'huge',
+    viewport: { columns: 120, rows: 40 },
+    props: { tool_use_id: 'huge', tool: 'Read', input: { file_path: '/s/huge.png' }, isRunning: false, isErrored: false, isInterrupted: false, output: { type: 'image', file: { base64: huge, type: 'image/png' } } },
+  })
+  expect((await row.findAll({ type: 'Image' })).map(found => (found.props.source as { png?: string }).png)).toEqual([RED])
+  expect(await row.find({ type: 'Text', text: /1206×2622/ })).toBeDefined()
+  await row.unmount()
 })

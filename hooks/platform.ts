@@ -24,10 +24,11 @@ function argv(tool: Converter, from: string, to: string, side: number): string[]
       return ['sips', '-s', 'format', 'png', '-Z', String(side), from, '--out', to]
     case 'magick':
     case 'convert':
-      return [tool, from, '-resize', `${side}x${side}>`, `png:${to}`]
+      // 8 bits a channel: a 16-bit source would otherwise stay twice the size
+      return [tool, from, '-resize', `${side}x${side}>`, '-depth', '8', `png:${to}`]
     case 'ffmpeg':
       return ['ffmpeg', '-v', 'error', '-y', '-i', from, '-frames:v', '1', '-vf',
-        `scale=w=min(${side}\\,iw):h=min(${side}\\,ih):force_original_aspect_ratio=decrease`, to]
+        `scale=w=min(${side}\\,iw):h=min(${side}\\,ih):force_original_aspect_ratio=decrease`, '-pix_fmt', 'rgb24', to]
   }
 }
 
