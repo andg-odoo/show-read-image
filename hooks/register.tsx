@@ -1073,12 +1073,18 @@ function chaptersWidth(chapters: ShowReadImageChapter[]) {
 // The clips of a card holding several videos; one plays at a time, picked from the list beside the player
 type Playlist = { items: { label: string; duration?: number }[]; at: number; pick: (i: number) => unknown }
 
+const PLAYLIST_WIDTH = 40
+
+// "name  0:47", the name cut short with … so the length stays on the row
 function playlistRow(item: Playlist['items'][number]) {
-  return `${item.label}  ${item.duration ? clockOf(item.duration, true) : ''}`.trimEnd()
+  const time = item.duration ? clockOf(item.duration, true) : ''
+  const room = PLAYLIST_WIDTH - 2 - (time ? time.length + 2 : 0)
+  const label = item.label.length > room ? `${item.label.slice(0, Math.max(1, room - 1))}…` : item.label
+  return time ? `${label}  ${time}` : label
 }
 
 function playlistWidth(playlist: Playlist) {
-  return Math.min(40, Math.max('Videos'.length, ...playlist.items.map(item => playlistRow(item).length + 2)))
+  return Math.min(PLAYLIST_WIDTH, Math.max('Videos'.length, ...playlist.items.map(item => playlistRow(item).length + 2)))
 }
 
 function PlaylistColumn(ui: Ui, site: string, playlist: Playlist) {
@@ -1264,7 +1270,8 @@ export const register: Register = on => {
       description:
         'Show image or video files to the user under this call, without loading them into your context. The card says they were not read by you, ' +
         'so Read an image instead when you need to see it yourself or make claims about it. One image draws on its own; several share one frame, ' +
-        'side by side, in the order given. A video (.mov/.mp4/.m4v) shows as a grid of frames the user can play in place. Each item: path, ' +
+        'side by side, in the order given. A video (.mov/.mp4/.m4v/.webm) shows as a grid of frames the user can play in place; several videos ' +
+        'share one player with a list to pick from. Each item: path, ' +
         'optional label, optional version (0 = the file as it is now; -1 = the version kept before it, -2 the one before that), and for a video ' +
         'optional chapters ({ label, at } in seconds) to jump to.',
       isDeferred: true,

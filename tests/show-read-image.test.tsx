@@ -1191,7 +1191,7 @@ test('several videos share one player, picked from a list beside it', async ($, 
     const { Text } = $.ui.resolve(e)
     return <Text>engine row</Text>
   })
-  await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'list', title: 'Bug reports', images: [{ path: '/s/one.mp4', label: 'one' }, { path: '/s/two.mp4', label: 'two' }] })
+  await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'list', title: 'Bug reports', images: [{ path: '/s/one.mp4', label: 'one' }, { path: '/s/two.mp4', label: 'document_accounting_bug_with_a_very_long_name' }] })
   const mount = () =>
     $.ui.mount({
       plugin: 'show-read-image', surface: 'terminal', component: 'ToolUse', requestId: 'list', viewport: { columns: 140, rows: 50 },
@@ -1202,12 +1202,13 @@ test('several videos share one player, picked from a list beside it', async ($, 
   expect(await card.findAll({ type: 'Image' })).toHaveLength(1)
   expect(await card.find({ type: 'Text', text: 'Videos' })).toBeDefined()
   expect(await card.find({ type: 'Text', text: '▸ one  0:10' })).toBeDefined()
-  expect((await card.find({ type: 'Button', key: 'list-clip-1' }))?.props.label).toBe('  two  0:05')
+  // A long name is cut short so its length stays on the row
+  expect((await card.find({ type: 'Button', key: 'list-clip-1' }))?.props.label).toBe('  document_accounting_bug_with_a_…  0:05')
   await card.press({ key: 'list-clip-1' })
   await card.unmount()
 
   const second = await mount()
-  expect(await second.find({ type: 'Text', text: '▸ two  0:05' })).toBeDefined()
+  expect(await second.find({ type: 'Text', text: '▸ document_accounting_bug_with_a_…  0:05' })).toBeDefined()
   await second.press({ key: 'list-play' })
   await new Promise<void>(done => setTimeout(done, 30))
   expect(spawned.at(-1)).toContain('/s/two.mp4')
