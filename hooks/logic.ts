@@ -175,3 +175,102 @@ export function sizeWarning(a: { width: number; height: number }, b: { width: nu
 export function pixels(size: { width: number; height: number }) {
   return `${size.width}×${size.height}`
 }
+
+// Images other tools produce
+
+export const MAX_TOOL_CARDS = 4
+
+// Commands that write an image without printing its path; their image arguments are what they made
+const MAKERS = /^(screencapture|sips|magick|convert|ffmpeg|rsvg-convert|xcrun\s+simctl\s+io\b.*\bscreenshot|simctl\s+io\b.*\bscreenshot|import|grim|scrot|maim)\b/
+// Commands that print paths of files they did not make
+const LISTINGS = /^(ls|find|fd|fdfind|rg|grep|tree|du|stat|file|git\s+(status|diff|log|show|ls-files))\b/
+
+export type CommandKind = 'maker' | 'listing' | 'other'
+
+// The first command of the line decides, after env assignments and a leading cd ... &&
+export function commandKind(command: string): CommandKind {
+  const first = command
+    .split(/&&|\|\||;|\|/)
+    .map(part => part.trim().replace(/^(\w+=\S*\s+)+/, ''))
+    .find(part => part && !/^cd\s/.test(part)) ?? ''
+  if (MAKERS.test(first)) {
+    return 'maker'
+  }
+  return LISTINGS.test(first) ? 'listing' : 'other'
+}
+
+const PATH_IN_TEXT = /(?:^|[\s"'=(:])(\/[^\s"'()<>]+?\.(?:png|jpe?g))(?=$|[\s"'),;<>])/gi
+const IMAGE_PATH = /^\/.+\.(png|jpe?g)$/i
+
+// A JSON result names paths whose keys say what they are; a thumbnail beside a full image is a duplicate
+function jsonPaths(text: string): string[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return []
+  }
+  const hits: { key: string; path: string }[] = []
+  const walk = (value: unknown, key: string, depth: number) => {
+    if (depth > 5) {
+      return
+    }
+    if (typeof value === 'string' && IMAGE_PATH.test(value)) {
+      hits.push({ key, path: value })
+    } else if (value && typeof value === 'object') {
+      for (const [k, v] of Object.entries(value)) {
+        walk(v, k, depth + 1)
+      }
+    }
+  }
+  walk(parsed, '', 0)
+  const full = hits.filter(hit => !/thumb/i.test(hit.key))
+  return (full.length > 0 ? full : hits).map(hit => hit.path)
+}
+
+// Image paths a tool call made: printed in its output, or, for an image-making command, named in it
+export function imagePathsIn(output: string, command?: string): string[] {
+  const kind = command === undefined ? 'other' : commandKind(command)
+  const fromJson = jsonPaths(output.trim())
+  const printed = kind === 'listing' ? [] : fromJson.length > 0 ? fromJson : [...output.matchAll(PATH_IN_TEXT)].map(m => m[1]!)
+  const named =
+    kind === 'maker'
+      ? (command ?? '')
+          .split(/\s+/)
+          .map(token => token.replace(/^["']|["']$/g, ''))
+          .filter(token => IMAGE_PATH.test(token))
+      : []
+  return [...new Set([...printed, ...named])].slice(0, MAX_TOOL_CARDS)
+}
+
+export type ImageBlock = { base64: string; mime: string }
+
+// Inline image blocks in a tool's result, as MCP servers return them
+export function imageBlocks(result: unknown, found: ImageBlock[] = [], depth = 0): ImageBlock[] {
+  if (depth > 5 || found.length >= MAX_TOOL_CARDS || result === null || typeof result !== 'object') {
+    return found
+  }
+  if (Array.isArray(result)) {
+    for (const item of result) {
+      imageBlocks(item, found, depth + 1)
+    }
+    return found
+  }
+  const record = result as Record<string, unknown>
+  if (record.type === 'image') {
+    const source = record.source as Record<string, unknown> | undefined
+    const data = typeof record.data === 'string' ? record.data : typeof source?.data === 'string' ? source.data : undefined
+    if (data) {
+      found.push({ base64: data, mime: String(record.mimeType ?? source?.media_type ?? 'image/png') })
+      return found
+    }
+  }
+  for (const value of Object.values(record)) {
+    imageBlocks(value, found, depth + 1)
+  }
+  return found
+}
+
+export function isPng(base64: string) {
+  return base64.startsWith('iVBORw0KGgo')
+}

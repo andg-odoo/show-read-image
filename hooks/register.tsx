@@ -1,7 +1,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register, ToolGroupCall } from 'claude-code'
 
-import type { ShowReadImageHistory, ShowReadImageMode, ShowReadImageView } from '../types'
+import type { ShowReadImageCardShot, ShowReadImageHistory, ShowReadImageMode, ShowReadImageView } from '../types'
 import {
   COMPACT,
   DEFAULT_CELL,
@@ -13,6 +13,9 @@ import {
   fit,
   hashOf,
   historyDir,
+  imageBlocks,
+  imagePathsIn,
+  isPng,
   isPngPath,
   pack,
   pairOf,
@@ -25,6 +28,7 @@ import {
   splitPath,
 } from './logic'
 import type { PngFile } from './logic'
+import { toPng, writeBytes } from './platform'
 
 type Ui = Elements['terminal']
 type Box = { columns: number; rows: number }
@@ -38,9 +42,14 @@ const history = atom({ plugin: 'show-read-image', key: 'history' } as const, {},
 const step = atom({ plugin: 'show-read-image', key: 'step' } as const, -1)
 const mode = atom({ plugin: 'show-read-image', key: 'mode' } as const, 'both' as ShowReadImageMode)
 const view = atom({ plugin: 'show-read-image', key: 'view' } as const, 'now' as ShowReadImageView)
+const cards = atom({ plugin: 'show-read-image', key: 'cards' } as const, {} as Record<string, ShowReadImageCardShot[]>, { shape: 'cards-1' })
 
 const MIN_FRAME = 30
 const MAX_SIDE = 6
+const MAX_CARDS_KEPT = 200
+// Our own tools draw their own cards; computer-use screenshots are the agent's working view, not results
+const SKIP_TOOLS = /^(Read$|mcp__show-read-image__|mcp__computer-use__)/
+const UNREAD = 'not read by the agent'
 // The session's tty size in cells and pixels; a hook process has no tty of its own, so it opens /dev/tty
 const WINSIZE = `perl -e 'open(T, "</dev/tty") or exit 1; my $w = " " x 8; ioctl(T, ($^O eq "darwin" ? 0x40087468 : 0x5413), $w) or exit 1; print join(" ", unpack("S4", $w))'`
 const MAX_PNG = 2 * 1024 * 1024
@@ -258,6 +267,7 @@ async function drawRead(
   file: PngFile,
   columns: number | undefined,
   isExpanded?: boolean,
+  isUnread?: boolean,
 ) {
   const { Box, Button, Image, Text } = ui
   const box = room(columns, isExpanded)
@@ -289,7 +299,7 @@ async function drawRead(
   const size = at === ownAt ? sizeOf(file) : (pngSize(base64) ?? sizeOf(file))
   const cells = fit(size, box.columns, box.rows, cell)
   const hasHistory = versions.length > 1
-  const meta = [pixels(size), hasHistory ? `v${at + 1}/${versions.length}` : '', hasHistory && version.at ? clock(version.at) : '']
+  const meta = [isUnread ? UNREAD : '', pixels(size), hasHistory ? `v${at + 1}/${versions.length}` : '', hasHistory && version.at ? clock(version.at) : '']
     .filter(Boolean)
     .join(' · ')
   const go = (by: number) => () =>
@@ -382,6 +392,107 @@ async function plan($: EngineInterface, reads: Read[]) {
   return { pairs, rest }
 }
 
+// A PNG of the file under the 2 MiB an Image takes: as it is, or converted and scaled down
+async function pngOfFile($: EngineInterface, path: string): Promise<string | undefined> {
+  const stat = await $.fs.stat(path).catch(() => undefined)
+  if (!stat || stat.kind !== 'file') {
+    return undefined
+  }
+  if (isPngPath(path) && stat.size <= MAX_PNG) {
+    return readDisk($, path)
+  }
+  const out = `${await homeOf($)}/.cache/show-read-image/converted/${hashOf(`${path}:${stat.mtimeMs}`).slice(0, 12)}`
+  for (const side of [2048, 1400, 1000]) {
+    const to = `${out}-${side}.png`
+    if (!(await $.fs.exists(to)) && !(await toPng($, path, to, side))) {
+      return undefined
+    }
+    const size = (await $.fs.stat(to).catch(() => undefined))?.size ?? Infinity
+    if (size <= MAX_PNG) {
+      return readDisk($, to)
+    }
+  }
+  return undefined
+}
+
+async function pngOfBlock($: EngineInterface, base64: string, key: string): Promise<string | undefined> {
+  if (isPng(base64) && base64.length * 0.75 <= MAX_PNG) {
+    return base64
+  }
+  const raw = `${await homeOf($)}/.cache/show-read-image/converted/${hashOf(key).slice(0, 12)}.raw`
+  return (await writeBytes($, raw, base64)) ? pngOfFile($, raw) : undefined
+}
+
+// Keeps what a tool call produced as versions under the call's id, so its row can draw them later
+async function collect($: EngineInterface, id: string, tool: string, input: Record<string, unknown>, result: unknown, text: string) {
+  const short = tool.split('__').pop() ?? tool
+  const shots: ShowReadImageCardShot[] = []
+  const blocks = imageBlocks(result)
+  if (blocks.length > 0) {
+    const { tool: _tool, tool_use_id: _id, ...args } = input
+    const base = `${short}-${hashOf(JSON.stringify(args).slice(0, 300)).slice(0, 6)}`
+    for (const [i, block] of blocks.entries()) {
+      const key = blocks.length > 1 ? `${base}-${i + 1}` : base
+      const base64 = await pngOfBlock($, block.base64, key)
+      if (base64) {
+        await record($, key, base64)
+        shots.push({ key, label: short, hash: hashOf(base64), isUnread: false })
+      }
+    }
+  } else {
+    const command = tool === 'Bash' && typeof input.command === 'string' ? input.command : undefined
+    for (const path of imagePathsIn(text, command)) {
+      const base64 = await pngOfFile($, path)
+      if (base64) {
+        await record($, path, base64)
+        shots.push({ key: path, label: splitPath(path).stem, hash: hashOf(base64), isUnread: true })
+      }
+    }
+  }
+  if (shots.length === 0) {
+    return
+  }
+  await update($, cards, all => {
+    const ids = Object.keys(all)
+    const kept = ids.length >= MAX_CARDS_KEPT ? Object.fromEntries(ids.slice(-MAX_CARDS_KEPT / 2).map(k => [k, all[k]!])) : all
+    return { ...kept, [id]: shots }
+  })
+}
+
+async function bytesOf($: EngineInterface, shot: ShowReadImageCardShot) {
+  const version = (await kept($))[shot.key]?.versions.find(one => one.hash === shot.hash)
+  return version ? readVersion($, shot.key, version.slot, version.hash) : undefined
+}
+
+// One picture draws as a read does, with its versions; several share a frame
+async function drawCard($: EngineInterface, ui: Ui, id: string, shots: ShowReadImageCardShot[], columns: number | undefined) {
+  const pictures: { shot: ShowReadImageCardShot; base64: string }[] = []
+  for (const shot of shots) {
+    const base64 = await bytesOf($, shot)
+    if (base64) {
+      pictures.push({ shot, base64 })
+    }
+  }
+  const [only] = pictures
+  if (!only) {
+    return undefined
+  }
+  if (pictures.length === 1) {
+    return drawRead($, ui, id, only.shot.key, { base64: only.base64 }, columns, false, only.shot.isUnread)
+  }
+  const panes = Panes(ui, `${id}-card`, pictures.map(one => shot(one.shot.label, diskPic(one.base64))), wide(columns), 6, 2)
+  const meta = [pictures.some(one => one.shot.isUnread) ? UNREAD : '', `${pictures.length} images`].filter(Boolean).join(' · ')
+  return Frame(ui, { title: only.shot.label, meta, width: panes.width }, panes.tree)
+}
+
+async function cardsIn($: EngineInterface, calls: ReadonlyArray<ToolGroupCall>) {
+  const all = await read($, cards)
+  return calls.flatMap(call => {
+    const shots = call.tool_use_id ? all[call.tool_use_id] : undefined
+    return call.tool_use_id && shots ? [[call.tool_use_id, shots] as const] : []
+  })
+}
+
 function readsOf(calls: ReadonlyArray<ToolGroupCall>): Read[] {
   return calls.flatMap((call, i) => {
     const file = pngOf(call.tool, call.output)
@@ -409,13 +520,44 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  // Images any other tool produced: inline blocks, or image files it printed or, for an image-making command, named
+  on('tool.call', async ($, e, next) => {
+    const ran = await next(e)
+    const tool = String(e.tool)
+    if (SKIP_TOOLS.test(tool) || ran.deny !== undefined || ran.isError === true) {
+      return ran
+    }
+    const input = e as unknown as Record<string, unknown>
+    void collect($, e.tool_use_id, tool, input, ran.result, ran.text ?? '').catch(() => undefined)
+    return ran
+  }).catch(($, e, next) => (next.called ? { deny: 'show-read-image: its hook failed after the tool ran.' } : next(e)))
+
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const reads = readsOf(e.props.calls)
     for (const one of reads) {
       mates.set(one.id, reads.map(other => other.path))
     }
-    if (reads.length === 0 || e.props.isExpanded || e.surface !== 'terminal') {
+    if (e.props.isExpanded || e.surface !== 'terminal') {
       return next(e)
+    }
+    const toolCards = await cardsIn($, e.props.calls)
+    if (reads.length === 0) {
+      if (toolCards.length === 0) {
+        return next(e)
+      }
+      void measure($, e.viewport)
+      const ui = $.ui.resolve(e)
+      const line = await next(e)
+      const drawn = []
+      for (const [id, shots] of toolCards) {
+        drawn.push(await drawCard($, ui, id, shots, e.viewport?.columns))
+      }
+      return (
+        <ui.Box flexDirection="column">
+          {line}
+          {drawn.filter(tree => tree !== undefined)}
+        </ui.Box>
+      )
     }
     const attempts = e.props.calls.filter(call => call.tool === 'Read' && isPngPath(pathOf(call.input)))
     if (attempts.some(call => call.isRunning)) {
@@ -443,6 +585,12 @@ export const register: Register = on => {
       const at = { title: `${shots.length} images`, hint: hints.length === 1 ? hints[0] : undefined, meta: `${rest.length} reads` }
       trees.push(Frame(ui, { ...at, width: panes.width }, panes.tree))
     }
+    for (const [id, shots] of toolCards) {
+      const tree = await drawCard($, ui, id, shots, columns)
+      if (tree) {
+        trees.push(tree)
+      }
+    }
     return (
       <ui.Box flexDirection="column">
         {line}
@@ -453,8 +601,25 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const file = pngOf(e.props.tool, e.props.output)
-    if (!file || e.props.isErrored || e.surface !== 'terminal') {
+    if (e.surface !== 'terminal' || e.props.isErrored) {
       return next(e)
+    }
+    if (!file) {
+      const id = e.props.tool_use_id ?? e.requestId
+      const shots = (await read($, cards))[id]
+      if (!shots) {
+        return next(e)
+      }
+      void measure($, e.viewport)
+      const row = await next(e)
+      const ui = $.ui.resolve(e)
+      const tree = await drawCard($, ui, id, shots, e.viewport?.columns)
+      return (
+        <ui.Box flexDirection="column">
+          {row}
+          {tree ?? null}
+        </ui.Box>
+      )
     }
     const path = pathOf(e.props.input)
     paths.set(e.requestId, path)

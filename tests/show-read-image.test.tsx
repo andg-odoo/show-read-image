@@ -1,6 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { addVersion, cellOf, fit, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+import { addVersion, cellOf, commandKind, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+
+// The test runtime has timers; the mod's lib leaves them out
+declare const setTimeout: (done: () => void, ms: number) => unknown
 
 const RED = 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAECAIAAAA8r+mnAAAAEklEQVR4nGP4z8CAFWEXJUsCAFpeH+EeQoQoAAAAAElFTkSuQmCC'
 const BLUE = 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAECAIAAAA8r+mnAAAAEElEQVR4nGNgYPiPA1FNAgAanh/hASyMewAAAABJRU5ErkJggg=='
@@ -174,4 +177,71 @@ test('a mixed group draws its pair frame first, then a gallery of the rest', asy
   })
   expect(await row.findAll({ type: 'Image' })).toHaveLength(0)
   await row.unmount()
+})
+
+test('image paths come from what a command printed or, for an image maker, what it named', () => {
+  expect(commandKind('screencapture -x /tmp/a.png')).toBe('maker')
+  expect(commandKind('cd /w && xcrun simctl io booted screenshot /tmp/s.png')).toBe('maker')
+  expect(commandKind('FOO=1 magick in.jpg /tmp/out.png')).toBe('maker')
+  expect(commandKind('ls -la shots/')).toBe('listing')
+  expect(commandKind('git status --short')).toBe('listing')
+  expect(commandKind('rg -l png src')).toBe('listing')
+  expect(commandKind('npm run build')).toBe('other')
+
+  expect(imagePathsIn('', 'screencapture -x "/tmp/a.png"')).toEqual(['/tmp/a.png'])
+  expect(imagePathsIn('Wrote screenshot to: /tmp/s.png', 'xcrun simctl io booted screenshot /tmp/s.png')).toEqual(['/tmp/s.png'])
+  expect(imagePathsIn('/w/shots/a.png\n/w/shots/b.png', 'ls /w/shots/*.png')).toEqual([])
+  expect(imagePathsIn('saved /tmp/chart.png', 'python plot.py')).toEqual(['/tmp/chart.png'])
+  // A build naming an image in its arguments did not necessarily make it
+  expect(imagePathsIn('', 'cp /a/in.png /b/out.png')).toEqual([])
+  expect(imagePathsIn(JSON.stringify({ screenshotPath: '/t/full.png', thumbnailPath: '/t/thumb.png' }))).toEqual(['/t/full.png'])
+  expect(imagePathsIn('/a/1.png /a/2.png /a/3.png /a/4.png /a/5.png', 'make shots')).toHaveLength(4)
+
+  expect(imageBlocks([{ type: 'text', text: 'hi' }, { type: 'image', data: 'AAAA', mimeType: 'image/jpeg' }])).toEqual([
+    { base64: 'AAAA', mime: 'image/jpeg' },
+  ])
+  expect(imageBlocks({ content: [{ type: 'image', source: { data: 'BBBB', media_type: 'image/png' } }] })).toEqual([
+    { base64: 'BBBB', mime: 'image/png' },
+  ])
+})
+
+test('a screenshot a Bash command wrote draws under its row, marked as not read', async ($, on) => {
+  const written = new Map<string, string>()
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('fs.stat', (_, e) => {
+    if (e.path !== '/tmp/s.png') {
+      throw new Error('ENOENT')
+    }
+    return { value: { kind: 'file' as const, size: 90, mtimeMs: 1, isLink: false } }
+  })
+  on('fs.read', (_, e) => (e.path === '/tmp/s.png' ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
+  on('tool.call', () => ({ result: 'ok', text: 'Wrote screenshot to: /tmp/s.png' }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+
+  await $.tool.call({ tool: 'Bash', command: 'xcrun simctl io booted screenshot /tmp/s.png', tool_use_id: 'bash-1' })
+  const ui = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'bash-1',
+    viewport: { columns: 120, rows: 40 },
+    props: { tool_use_id: 'bash-1', tool: 'Bash', input: { command: 'x' }, isRunning: false, isErrored: false, isInterrupted: false, output: 'ok' },
+  })
+  let image = await ui.find({ type: 'Image' })
+  for (let tries = 0; !image && tries < 20; tries++) {
+    await new Promise<void>(done => setTimeout(done, 10))
+    image = await ui.find({ type: 'Image' })
+  }
+  expect(image).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /not read by the agent/ }))?.text).toContain('8×4')
+  await ui.unmount()
 })
