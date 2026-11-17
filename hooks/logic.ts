@@ -369,3 +369,22 @@ export function stripLayout(width: number, height: number) {
   const isTall = height >= width
   return isTall ? { columns: 4, rows: 2, cellHeight: 480 } : { columns: 2, rows: 4, cellHeight: 270 }
 }
+
+// Live playback
+
+// A line from the frame helper: `FRAME <t> <base64 png>`, `META {…}` or `END <count>`
+export function parseFrameLine(line: string): { kind: 'frame'; t: number; png: string } | { kind: 'end' } | undefined {
+  if (line.startsWith('FRAME ')) {
+    const space = line.indexOf(' ', 6)
+    const t = Number(line.slice(6, space))
+    const png = line.slice(space + 1)
+    return space > 6 && Number.isFinite(t) && png ? { kind: 'frame', t, png } : undefined
+  }
+  return line.startsWith('END') ? { kind: 'end' } : undefined
+}
+
+// The pixel box frames are decoded into: the pane's cells, short of the rows its controls take
+export function playerBox(columns: number, rows: number, cellWidth: number, cell: number, controlRows = 2) {
+  const cellHeight = cellWidth * cell
+  return { width: Math.max(64, Math.round(columns * cellWidth)), height: Math.max(64, Math.round((rows - controlRows) * cellHeight)) }
+}

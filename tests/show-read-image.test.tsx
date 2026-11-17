@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { addVersion, cellFromTmux, cellOf, commandKind, isVideoPath, longestGap, sampleTimes, samplesRow, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+import { addVersion, cellFromTmux, cellOf, commandKind, parseFrameLine, playerBox, isVideoPath, longestGap, sampleTimes, samplesRow, stripLayout, videoNote, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
 
 // The test runtime has timers; the mod's lib leaves them out
 declare const setTimeout: (done: () => void, ms: number) => unknown
@@ -795,4 +795,82 @@ test('the converted folder keeps its newest files within 200 MB', async ($, on) 
   await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'jpg', images: [{ path: '/s/photo.jpg' }] })
   await new Promise<void>(done => setTimeout(done, 30))
   expect(removed).toEqual([`${dir}/old.png`])
+})
+
+test('frame lines and the decode box', () => {
+  expect(parseFrameLine('FRAME 1.250 iVBORw0KGgo')).toEqual({ kind: 'frame', t: 1.25, png: 'iVBORw0KGgo' })
+  expect(parseFrameLine('META {"duration":9.6}')).toBeUndefined()
+  expect(parseFrameLine('END 83')).toEqual({ kind: 'end' })
+  expect(parseFrameLine('FRAME x')).toBeUndefined()
+  // 80×30 cells of 10×21 px, less three rows for the controls
+  expect(playerBox(80, 30, 10, 2.1, 3)).toEqual({ width: 800, height: 567 })
+})
+
+test('a video expands to its filmstrip with play, and play starts ffmpeg in real time at the pane size', async ($, on) => {
+  const written = new Map<string, string>()
+  const spawned: string[][] = []
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('process.run', (_, e) => {
+    const line = e.argv.join(' ')
+    const stdout = line === 'uname -s'
+      ? 'Linux\n'
+      : line.includes('command -v') ? '/usr/bin/x\n'
+      : line.includes('stream=width,height') ? '390,844\n'
+      : line.includes('packet=pts_time') ? '0\n0.5\n'
+      : line.includes('format=duration') ? '5\n'
+      : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('process.spawn', async function* (_, e) {
+    spawned.push([...e.argv])
+    return { value: { code: 0, signal: null } }
+  })
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/clip.mp4' || e.path.endsWith('-strip.png')) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 5, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => (e.path.endsWith('-strip.png') ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
+  on('fs.list', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'v', images: [{ path: '/s/clip.mp4' }] })
+  const card = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'v',
+    viewport: { columns: 120, rows: 40 },
+    props: { tool_use_id: 'v', tool: 'mcp__show-read-image__show_images', input: {}, isRunning: false, isErrored: false, isInterrupted: false, output: '' },
+  })
+  await card.press({ key: 'v-expand' })
+  await card.unmount()
+
+  const pane = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'show-read-image',
+    viewport: { columns: 160, rows: 50 },
+    props: { title: 'clip', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  })
+  expect(await pane.find({ type: 'Text', text: 'filmstrip' })).toBeDefined()
+  await pane.press({ key: 'player-play' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  const [ffmpeg] = spawned
+  expect(ffmpeg?.[0]).toBe('ffmpeg')
+  expect(ffmpeg).toContain('-re')
+  expect(ffmpeg?.join(' ')).toContain('fps=20,scale=w=800:h=567:force_original_aspect_ratio=decrease')
+  expect(ffmpeg?.at(-1)).toMatch(/\/converted\/play-[a-z0-9]+\/f%06d\.png$/)
+  await pane.unmount()
 })
