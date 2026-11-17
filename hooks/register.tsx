@@ -882,6 +882,9 @@ async function cardsIn($: EngineInterface, calls: ReadonlyArray<ToolGroupCall>) 
   })
 }
 
+let resizeTimer: { cancel: () => void } | undefined
+let wantedBox: { width: number; height: number } | undefined
+
 // The Expand pane for a video: its filmstrip with [ play ], then live frames with pause, restart and the frame rate
 async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: number, video: string, label: string, strip: string) {
   const { Box, Button, Image, Text } = ui
@@ -891,21 +894,27 @@ async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: num
     stopPlayback($)
   }
   const box = playerBox(columns, rows, cellWidth, cell, 3)
-  const start = async (from: number) => {
-    const source = await playbackSource($, video, box, from, PLAYER_FPS, await convertedDir($))
+  const start = async (from: number, size = box) => {
+    const source = await playbackSource($, video, size, from, PLAYER_FPS, await convertedDir($))
     if (!source) {
       await $.ui.toast('show-read-image: playing a video needs clang on macOS, or ffmpeg')
       return
     }
-    play($, PANE, video, from, box, source)
+    play($, PANE, video, from, size, source)
   }
-  // A resized pane decodes at its new size, from where it was
+  // A resized pane decodes at its new size, from where it was, once the size has held for a moment: dragging the
+  // pane's edge redraws many times, and restarting on each would decode a burst of short runs
   if (p?.status === 'playing' && p.box && (Math.abs(p.box.width - box.width) > 40 || Math.abs(p.box.height - box.height) > 40)) {
-    // Taken now, so the redraws before the new decoder's first frame don't start it again
-    p.box = box
-    void start(p.position)
+    wantedBox = box
+    resizeTimer ??= $.clock.after(300, () => {
+      resizeTimer = undefined
+      const now = currentPlayback()
+      if (now && now.status === 'playing' && wantedBox) {
+        void start(now.position, wantedBox)
+      }
+    })
   }
-  const frame = p?.first
+  const frame = p?.first ?? p?.last
   const picture = frame ?? strip
   const cells = fit(pngSize(picture) ?? UNKNOWN, columns, Math.max(4, rows - 3), cell)
   const status = !p

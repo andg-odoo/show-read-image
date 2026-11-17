@@ -177,6 +177,8 @@ export async function playbackSource(
   if (!(await has($, 'ffmpeg'))) {
     return undefined
   }
+  // One playback at a time, so any play-* folder left by a crash or a killed session is stale
+  await $.process.run(['sh', '-c', 'rm -rf "$1"/play-*', 'sh', cache]).catch(() => undefined)
   const dir = `${cache}/play-${Date.now().toString(36)}`
   await $.process.run(['mkdir', '-p', dir])
   const scale = `fps=${fps},scale=w=${box.width}:h=${box.height}:force_original_aspect_ratio=decrease`

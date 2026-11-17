@@ -816,7 +816,11 @@ test('a video expands to its filmstrip with play, and play starts ffmpeg in real
     written.set(e.path, e.text)
     return { value: undefined }
   })
+  const removed: string[] = []
   on('process.run', (_, e) => {
+    if (e.argv[0] === 'rm') {
+      removed.push(...e.argv.slice(2))
+    }
     const line = e.argv.join(' ')
     const stdout = line === 'uname -s'
       ? 'Linux\n'
@@ -840,6 +844,7 @@ test('a video expands to its filmstrip with play, and play starts ffmpeg in real
   on('fs.read', (_, e) => (e.path.endsWith('-strip.png') ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
   on('fs.list', () => ({ value: [] }))
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.close', () => ({ value: undefined }))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>engine row</Text>
@@ -873,4 +878,22 @@ test('a video expands to its filmstrip with play, and play starts ffmpeg in real
   expect(ffmpeg?.join(' ')).toContain('fps=20,scale=w=800:h=567:force_original_aspect_ratio=decrease')
   expect(ffmpeg?.at(-1)).toMatch(/\/converted\/play-[a-z0-9]+\/f%06d\.png$/)
   await pane.unmount()
+
+  // Closing the pane, even mid-play, removes the run's frames folder
+  await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'v2', images: [{ path: '/s/clip.mp4' }] })
+  const again = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'show-read-image',
+    viewport: { columns: 160, rows: 50 },
+    props: { title: 'clip', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  })
+  await again.press({ key: 'player-play' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  const folder = spawned.at(-1)!.at(-1)!.replace(/\/f%06d\.png$/, '')
+  await again.press({ key: 'pane-close' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  expect(removed).toContain(folder)
+  await again.unmount()
 })

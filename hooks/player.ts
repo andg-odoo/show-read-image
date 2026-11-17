@@ -15,6 +15,8 @@ export type Playback = {
   error: string
   position: number
   first: string | undefined
+  // The newest frame shown, kept through a restart so the pane doesn't fall back to the filmstrip
+  last: string | undefined
   pending: string | undefined
   isBlitting: boolean
   received: number
@@ -24,7 +26,7 @@ export type Playback = {
   box: { width: number; height: number } | undefined
 }
 
-type Run = { child: Child | undefined; poll: { cancel: () => void } | undefined; generation: number }
+type Run = { child: Child | undefined; poll: { cancel: () => void } | undefined; generation: number; dir?: string }
 
 let playback: Playback | undefined
 let run: Run = { child: undefined, poll: undefined, generation: 0 }
@@ -60,6 +62,7 @@ async function pump($: EngineInterface, p: Playback, paneId: string) {
 function onFrame($: EngineInterface, p: Playback, paneId: string, png: string, t: number) {
   p.received += 1
   p.position = t
+  p.last = png
   // The first frame is drawn by the pane itself, which fixes the Image's size; the rest are blitted into it
   if (!p.first) {
     p.first = png
@@ -74,17 +77,21 @@ function onFrame($: EngineInterface, p: Playback, paneId: string, png: string, t
   void pump($, p, paneId)
 }
 
-function stopChild() {
+// Stops the decoder and removes its frames folder, however playback ended
+function stopChild($: EngineInterface) {
   run.poll?.cancel()
-  const child = run.child
+  const { child, dir } = run
   run = { child: undefined, poll: undefined, generation: run.generation + 1 }
   if (child) {
     void child.return?.(undefined as never)
   }
+  if (dir) {
+    void $.process.run(['rm', '-rf', dir]).catch(() => undefined)
+  }
 }
 
 export function stop($: EngineInterface) {
-  stopChild()
+  stopChild($)
   ticker?.cancel()
   ticker = undefined
   playback = undefined
@@ -93,7 +100,7 @@ export function stop($: EngineInterface) {
 
 export function pause($: EngineInterface) {
   if (playback && playback.status !== 'ended') {
-    stopChild()
+    stopChild($)
     playback.status = 'paused'
     redraw($)
   }
@@ -103,11 +110,11 @@ export type Source = { kind: 'helper'; argv: string[] } | { kind: 'files'; argv:
 
 // Starts (or restarts from `from`) playing `video`; `source` says how to get its frames on this machine
 export function play($: EngineInterface, paneId: string, video: string, from: number, box: { width: number; height: number }, source: Source) {
-  stopChild()
+  stopChild($)
   const p: Playback =
     playback?.video === video
       ? { ...playback, status: 'starting', error: '', first: undefined, pending: undefined, isBlitting: false, box }
-      : { video, status: 'starting', error: '', position: from, first: undefined, pending: undefined, isBlitting: false, received: 0, shown: 0, dropped: 0, shownLastSecond: 0, box }
+      : { video, status: 'starting', error: '', position: from, first: undefined, last: undefined, pending: undefined, isBlitting: false, received: 0, shown: 0, dropped: 0, shownLastSecond: 0, box }
   playback = p
   ticker ??= $.clock.every(1000, () => {
     if (playback) {
@@ -119,6 +126,9 @@ export function play($: EngineInterface, paneId: string, video: string, from: nu
   const generation = run.generation
   const child = $.process.spawn({ argv: source.argv })
   run.child = child
+  if (source.kind === 'files') {
+    run.dir = source.dir
+  }
   const isCurrent = () => run.generation === generation && playback === p
   void (async () => {
     let buffer = ''
