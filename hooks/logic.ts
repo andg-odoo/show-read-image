@@ -93,18 +93,32 @@ export function sizeOf(file: PngFile) {
 // A cell's height over its width; most fonts are close to 2 when the terminal reports no pixel size
 export const DEFAULT_CELL = 2
 
+// A cell's width in pixels where the terminal does not say; close for common fonts at 1x
+export const DEFAULT_CELL_WIDTH = 10
+
 // TIOCGWINSZ printed as `rows columns xpixel ypixel`; tmux and some terminals report 0 pixels
-export function cellOf(winsize: string): number | undefined {
+export function cellSizeOf(winsize: string): { width: number; height: number } | undefined {
   const [rows = 0, columns = 0, xpixel = 0, ypixel = 0] = winsize.trim().split(/\s+/).map(Number)
   if (!(rows > 0 && columns > 0 && xpixel > 0 && ypixel > 0)) {
     return undefined
   }
-  const cell = ypixel / rows / (xpixel / columns)
-  return cell >= 1 && cell <= 4 ? cell : undefined
+  const size = { width: xpixel / columns, height: ypixel / rows }
+  const shape = size.height / size.width
+  return shape >= 1 && shape <= 4 ? size : undefined
 }
 
-export function fit(size: { width: number; height: number }, columns: number, maxRows: number, cell = DEFAULT_CELL) {
-  let cols = Math.max(1, columns)
+export function cellOf(winsize: string): number | undefined {
+  const size = cellSizeOf(winsize)
+  return size && size.height / size.width
+}
+
+// The widest a picture draws without being enlarged past its own pixels, but never smaller than `floor`
+export function nativeColumns(width: number, cellWidth: number, floor = 16) {
+  return Math.max(floor, Math.ceil(width / cellWidth))
+}
+
+export function fit(size: { width: number; height: number }, columns: number, maxRows: number, cell = DEFAULT_CELL, maxColumns = Infinity) {
+  let cols = Math.max(1, Math.min(columns, maxColumns))
   let rows = Math.max(1, Math.round((cols * size.height) / size.width / cell))
   if (rows > maxRows) {
     rows = maxRows
@@ -124,11 +138,17 @@ export function pack(
   perRow = Infinity,
   gap = 2,
   cell = DEFAULT_CELL,
+  maxColumns: number[] = [],
 ): Slot[][] {
   const heightOf = (row: number[]) => {
     const room = width - gap * (row.length - 1)
     const cells = row.reduce((sum, i) => sum + cell * aspects[i]!, 0)
     return Math.min(maxRows, Math.floor(room / cells))
+  }
+  // Rows are chosen by width alone; then a row is no taller than its smallest picture's own height
+  const drawnHeightOf = (row: number[]) => {
+    const native = Math.min(...row.map(i => (maxColumns[i] ?? Infinity) / (cell * aspects[i]!)))
+    return Math.max(1, Math.min(heightOf(row), Math.floor(native)))
   }
   const rows: number[][] = []
   let current: number[] = []
@@ -143,7 +163,7 @@ export function pack(
     rows.push(current)
   }
   return rows.map(row => {
-    const height = Math.max(1, heightOf(row))
+    const height = drawnHeightOf(row)
     return row.map(index => ({
       index,
       rows: height,

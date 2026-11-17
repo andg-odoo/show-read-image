@@ -19,8 +19,11 @@ A Claude Code mod that draws images inline in the transcript, under the tool cal
 - **Versions.** Each new content of a path is kept as a version (the last 10), under `~/.cache/show-read-image/`.
   A picture with history has two views: Now, with ◀ ▶ to step back, and Side by side, with the newest six.
 - **Aspect warning.** Shots whose aspect ratios differ by more than 10% get a warning, since they are not comparable.
-- **Real cell shape.** Pictures are sized from the terminal's measured cell shape, falling back to 2:1 where it
-  reports no pixel size.
+- **One way to compare.** A card with several images has `[ side by side ] [ A only ] [ B only ]` for two, and
+  `[ all ] [ vs B ] [ vs C ] …` for more, each beside the first.
+- **True size.** Pictures are sized from the terminal's measured cell shape (2:1 where it reports no pixel size),
+  never drawn larger than their own pixels (with a 16-column floor so tiny ones stay visible), and kept within 60%
+  of the visible rows.
 
 JPEGs, and PNGs over the 2 MiB an image may take, are converted and scaled down with whichever of `sips`, `magick`,
 `convert` or `ffmpeg` the machine has. Without one of them, those images get no card.

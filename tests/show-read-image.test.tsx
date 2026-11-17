@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { addVersion, cellOf, commandKind, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+import { addVersion, cellOf, commandKind, nativeColumns, fit, imageBlocks, imagePathsIn, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
 
 // The test runtime has timers; the mod's lib leaves them out
 declare const setTimeout: (done: () => void, ms: number) => unknown
@@ -63,6 +63,18 @@ test('the cell shape comes from the tty and falls back to 2:1', () => {
   expect(pack([1, 1], 100, 100, 6, Infinity, 2, 2.5)[0]![0]).toEqual({ index: 0, columns: 48, rows: 19 })
 })
 
+test('pictures never draw larger than their own pixels, but keep a readable floor', () => {
+  expect(nativeColumns(240, 10)).toBe(24)
+  expect(nativeColumns(64, 10)).toBe(16)
+  expect(fit({ width: 240, height: 160 }, 100, 30, 2, nativeColumns(240, 10))).toEqual({ columns: 24, rows: 8 })
+  // A 400×100 before and a 200×200 after share the shorter one's own height instead of enlarging it
+  const [row] = pack([4, 1], 200, 30, 1, 2, 2, 2, [nativeColumns(400, 10), nativeColumns(200, 10)])
+  expect(row).toEqual([
+    { index: 0, columns: 40, rows: 5 },
+    { index: 1, columns: 10, rows: 5 },
+  ])
+})
+
 test('a read PNG is kept once per content and stepped through', async ($, on) => {
   const written = new Map<string, string>()
   let next = RED
@@ -97,7 +109,8 @@ test('a read PNG is kept once per content and stepped through', async ($, on) =>
     viewport: { columns: 120, rows: 40 },
     props: call('read-2', '/s/shot.png', BLUE),
   })
-  expect((await ui.find({ type: 'Text', text: /v2\/2/ }))?.text).toContain('8×4')
+  expect(await ui.find({ type: 'Text', text: 'v2/2' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /8×4/ })).toBeDefined()
   await ui.press({ key: 'prev' })
   expect(await ui.find({ type: 'Text', text: /v1\/2/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /older version/ })).toBeDefined()
@@ -296,11 +309,31 @@ test('show_images draws a titled, unread card and can step back a version', asyn
   edits += 1
   await $.tool.call({ tool, tool_use_id: 'show-2', images: [{ path: '/s/a.png', version: -1, label: 'previous' }] })
   const back = await mount('show-2')
-  expect((await back.find({ type: 'Text', text: /v1\/2/ }))?.text).toContain('not read by the agent')
+  expect(await back.find({ type: 'Text', text: 'v1/2' })).toBeDefined()
+  expect(await back.find({ type: 'Text', text: /not read by the agent/ })).toBeDefined()
 
   expect((await back.findAll({ type: 'Image' })).map(found => (found.props.source as { png?: string }).png)).toEqual([RED])
   const clamped = await $.tool.call({ tool, tool_use_id: 'show-4', images: [{ path: '/s/a.png', version: -5 }] })
   expect(String(clamped.result)).toContain('showing the oldest')
+
+  const three = await $.tool.call({
+    tool,
+    tool_use_id: 'show-5',
+    images: [{ path: '/s/a.png', label: 'A' }, { path: '/s/b.png', label: 'B' }, { path: '/s/a.png', label: 'C', version: -1 }],
+  })
+  expect(String(three.result)).toContain('Shown 3 image(s)')
+  const compare = await mount('show-5')
+  expect(await compare.findAll({ type: 'Image' })).toHaveLength(3)
+  await compare.press({ key: 'pick-2' })
+  expect((await compare.findAll({ type: 'Image' })).map(found => (found.props.source as { png?: string }).png)).toEqual([BLUE, RED])
+  await compare.press({ key: 'pick--1' })
+  expect(await compare.findAll({ type: 'Image' })).toHaveLength(3)
+  await compare.unmount()
+
+  const pair = await mount('show-1')
+  await pair.press({ key: 'pick-1' })
+  expect((await pair.findAll({ type: 'Image' })).map(found => (found.props.source as { png?: string }).png)).toEqual([GREEN])
+  await pair.unmount()
 
   const missing = await $.tool.call({ tool, tool_use_id: 'show-3', images: [{ path: '/s/none.png' }] })
   expect(String(missing.result)).toContain('Could not show: /s/none.png')

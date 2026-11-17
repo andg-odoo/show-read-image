@@ -17,6 +17,7 @@ declare module 'claude-code' {
       step: StateFamily<number>
       mode: StateFamily<ShowReadImageMode>
       view: StateFamily<ShowReadImageView>
+      pick: StateFamily<number>
       cards: Shaped<Record<string, ShowReadImageCard>>
     }
   }

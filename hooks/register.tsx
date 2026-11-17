@@ -5,10 +5,11 @@ import type { ShowReadImageCard, ShowReadImageCardShot, ShowReadImageHistory, Sh
 import {
   COMPACT,
   DEFAULT_CELL,
+  DEFAULT_CELL_WIDTH,
   EXPANDED,
   WIDE,
   addVersion,
-  cellOf,
+  cellSizeOf,
   fingerprint,
   fit,
   hashOf,
@@ -17,6 +18,7 @@ import {
   imagePathsIn,
   isPng,
   isPngPath,
+  nativeColumns,
   pack,
   pairOf,
   pathOf,
@@ -42,6 +44,8 @@ const history = atom({ plugin: 'show-read-image', key: 'history' } as const, {},
 const step = atom({ plugin: 'show-read-image', key: 'step' } as const, -1)
 const mode = atom({ plugin: 'show-read-image', key: 'mode' } as const, 'both' as ShowReadImageMode)
 const view = atom({ plugin: 'show-read-image', key: 'view' } as const, 'now' as ShowReadImageView)
+// A compare card's choice: -1 all; with two pictures, which one alone; with more, which one beside the first
+const pick = atom({ plugin: 'show-read-image', key: 'pick' } as const, -1)
 const cards = atom({ plugin: 'show-read-image', key: 'cards' } as const, {} as Record<string, ShowReadImageCard>, { shape: 'cards-1' })
 
 const MIN_FRAME = 30
@@ -69,6 +73,8 @@ const versionBytes = new Map<string, string>()
 const diskBytes = new Map<string, { mtimeMs: number; base64: string }>()
 let home: string | undefined
 let cell = DEFAULT_CELL
+let cellWidth = DEFAULT_CELL_WIDTH
+let viewRows = 40
 const MAX_CACHED = 24
 
 // Keeps the most recently used few; each entry can hold a couple of MB of base64
@@ -88,10 +94,14 @@ async function measure($: EngineInterface, viewport: { columns: number; rows: nu
     return
   }
   measuredFor = key
+  viewRows = viewport?.rows ?? viewRows
   const ran = await $.process.run(['sh', '-c', WINSIZE]).catch(() => undefined)
-  const next = (ran?.exitCode === 0 ? cellOf(ran.stdout) : undefined) ?? DEFAULT_CELL
-  if (next !== cell) {
+  const size = ran?.exitCode === 0 ? cellSizeOf(ran.stdout) : undefined
+  const next = size ? size.height / size.width : DEFAULT_CELL
+  const width = size?.width ?? DEFAULT_CELL_WIDTH
+  if (next !== cell || width !== cellWidth) {
     cell = next
+    cellWidth = width
     $.ui.invalidate('ui.render')
   }
 }
@@ -179,14 +189,19 @@ async function record($: EngineInterface, path: string, base64: string) {
   }
 }
 
+// A card stays within most of the visible rows, so its title and controls are on screen with it
+function tallest(max: number) {
+  return Math.max(8, Math.min(max, Math.floor(viewRows * 0.6)))
+}
+
 function room(columns: number | undefined, isExpanded?: boolean): Box {
   const max = isExpanded ? EXPANDED : COMPACT
-  return { columns: Math.max(20, Math.min(max.columns, (columns ?? 120) - 8)), rows: max.rows }
+  return { columns: Math.max(20, Math.min(max.columns, (columns ?? 120) - 8)), rows: tallest(max.rows) }
 }
 
 // Galleries and pairs take the transcript's width, two pictures a row
 function wide(columns: number | undefined): Box {
-  return { columns: Math.max(20, Math.min(WIDE.columns, (columns ?? 120) - 8)), rows: WIDE.rows }
+  return { columns: Math.max(20, Math.min(WIDE.columns, (columns ?? 120) - 8)), rows: tallest(WIDE.rows) }
 }
 
 function clock(at: number) {
@@ -219,7 +234,8 @@ function Frame(ui: Ui, at: { title: string; hint?: string; meta: string; width: 
 // Pictures packed into rows, each with a small title over it
 function Panes(ui: Ui, id: string, shots: Shot[], box: Box, minRows: number, perRow: number) {
   const { Box, Text, Image } = ui
-  const rows = pack(shots.map(shot => shot.size.width / shot.size.height), box.columns, box.rows, minRows, perRow, 2, cell)
+  const natives = shots.map(shot => nativeColumns(shot.size.width, cellWidth))
+  const rows = pack(shots.map(shot => shot.size.width / shot.size.height), box.columns, box.rows, minRows, perRow, 2, cell, natives)
   const width = Math.max(...rows.map(row => row.reduce((sum, slot) => sum + slot.columns, 0) + 2 * (row.length - 1)))
   const tree = (
     <Box flexDirection="column" gap={1}>
@@ -329,9 +345,9 @@ async function drawRead(
   }
   const version = versions[at]!
   const size = at === ownAt ? sizeOf(file) : (pngSize(base64) ?? sizeOf(file))
-  const cells = fit(size, box.columns, box.rows, cell)
+  const cells = fit(size, box.columns, box.rows, cell, nativeColumns(size.width, cellWidth))
   const hasHistory = versions.length > 1
-  const meta = [isUnread ? UNREAD : '', !isKept && saved.length > 0 ? 'older than the kept versions' : '', pixels(size), hasHistory ? `v${at + 1}/${versions.length}` : '', hasHistory && version.at ? clock(version.at) : '']
+  const meta = [isUnread ? UNREAD : '', !isKept && saved.length > 0 ? 'older than the kept versions' : '', pixels(size), hasHistory && version.at ? clock(version.at) : '']
     .filter(Boolean)
     .join(' · ')
   const go = (by: number) => () =>
@@ -353,14 +369,13 @@ async function drawRead(
   const chip = (to: ShowReadImageView, label: string) => (
     <Button
       key={`view-${to}`}
-      plain
       label={label}
       variant={shown === to ? 'primary' : undefined}
       dimColor={shown !== to}
       onPress={() => update($, memberOf(view, { requestId }), () => to)}
     />
   )
-  const chips = [chip('now', 'Now'), chip('side', 'Side by side')]
+  const chips = [chip('now', 'now'), chip('side', 'side by side')]
   if (shown === 'side') {
     const first = Math.max(0, versions.length - MAX_SIDE)
     const shots: Shot[] = []
@@ -383,11 +398,13 @@ async function drawRead(
     )
   }
   const controls = (
-    <Box flexDirection="row" gap={1}>
-      {chips}
-      <Text dimColor>·</Text>
-      <Button key="prev" plain label="◀" dimColor={at === 0} onPress={go(-1)} />
-      <Button key="next" plain label="▶" dimColor={at === versions.length - 1} onPress={go(1)} />
+    <Box flexDirection="row" gap={3}>
+      <Box flexDirection="row" gap={1}>{chips}</Box>
+      <Box flexDirection="row" gap={1}>
+        <Button key="prev" plain label="◀" dimColor={at === 0} onPress={go(-1)} />
+        <Text>{`v${at + 1}/${versions.length}`}</Text>
+        <Button key="next" plain label="▶" dimColor={at === versions.length - 1} onPress={go(1)} />
+      </Box>
       <Text dimColor>{at === ownAt ? 'as read here' : `older version, read here was v${ownAt + 1}`}</Text>
     </Box>
   )
@@ -564,11 +581,28 @@ async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadIm
   if (pictures.length === 1 && card.title === undefined) {
     return drawRead($, ui, id, only.shot.key, { base64: only.base64 }, columns, false, only.shot.isUnread)
   }
-  const panes = Panes(ui, `${id}-card`, pictures.map(one => shot(one.shot.label, diskPic(one.base64))), wide(columns), 6, 2)
+  const { Box, Button } = ui
+  const chosen = await read($, memberOf(pick, { requestId: id }))
+  const at = chosen >= 0 && chosen < pictures.length ? chosen : -1
+  const choose = (to: number) => () => update($, memberOf(pick, { requestId: id }), () => to)
+  const chip = (to: number, label: string) => (
+    <Button key={`pick-${to}`} label={label} variant={at === to ? 'primary' : undefined} dimColor={at !== to} onPress={choose(to)} />
+  )
+  const isPair = pictures.length === 2
+  const chips =
+    pictures.length < 2
+      ? []
+      : [
+          chip(-1, isPair ? 'side by side' : 'all'),
+          ...pictures.map((one, i) => (isPair ? chip(i, `${one.shot.label} only`) : i === 0 ? null : chip(i, `vs ${one.shot.label}`))),
+        ].filter(one => one !== null)
+  const shown = at < 0 ? pictures : isPair ? [pictures[at]!] : [pictures[0]!, pictures[at]!]
+  const panes = Panes(ui, `${id}-card`, shown.map(one => shot(one.shot.label, diskPic(one.base64))), wide(columns), 6, isPair || at >= 0 ? 2 : 3)
   const meta = [pictures.some(one => one.shot.isUnread) ? UNREAD : '', pictures.length > 1 ? `${pictures.length} images` : pixels(diskPic(only.base64).size)]
     .filter(Boolean)
     .join(' · ')
-  return Frame(ui, { title: card.title ?? only.shot.label, meta, width: panes.width }, panes.tree)
+  const controls = chips.length > 0 ? [<Box flexDirection="row" gap={1}>{chips}</Box>] : []
+  return Frame(ui, { title: card.title ?? only.shot.label, meta, width: panes.width }, ...controls, panes.tree)
 }
 
 async function cardsIn($: EngineInterface, calls: ReadonlyArray<ToolGroupCall>) {
