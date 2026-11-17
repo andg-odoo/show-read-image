@@ -1,7 +1,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register, ToolGroupCall } from 'claude-code'
 
-import type { ShowReadImageHistory, ShowReadImageMode } from '../types'
+import type { ShowReadImageHistory, ShowReadImageMode, ShowReadImageView } from '../types'
 import {
   COMPACT,
   DEFAULT_CELL,
@@ -37,8 +37,10 @@ type Pair = { stem: string; hint: string; before: Pic; after: Pic }
 const history = atom({ plugin: 'show-read-image', key: 'history' } as const, {}, { shape: 'history-1' })
 const step = atom({ plugin: 'show-read-image', key: 'step' } as const, -1)
 const mode = atom({ plugin: 'show-read-image', key: 'mode' } as const, 'both' as ShowReadImageMode)
+const view = atom({ plugin: 'show-read-image', key: 'view' } as const, 'now' as ShowReadImageView)
 
 const MIN_FRAME = 30
+const MAX_SIDE = 6
 // The session's tty size in cells and pixels; a hook process has no tty of its own, so it opens /dev/tty
 const WINSIZE = `perl -e 'open(T, "</dev/tty") or exit 1; my $w = " " x 8; ioctl(T, ($^O eq "darwin" ? 0x40087468 : 0x5413), $w) or exit 1; print join(" ", unpack("S4", $w))'`
 const MAX_PNG = 2 * 1024 * 1024
@@ -305,8 +307,43 @@ async function drawRead(
   if (!hasHistory) {
     return Frame(ui, frame, image)
   }
+  const shown = await read($, memberOf(view, { requestId }))
+  const chip = (to: ShowReadImageView, label: string) => (
+    <Button
+      key={`view-${to}`}
+      plain
+      label={label}
+      variant={shown === to ? 'primary' : undefined}
+      dimColor={shown !== to}
+      onPress={() => update($, memberOf(view, { requestId }), () => to)}
+    />
+  )
+  const chips = [chip('now', 'Now'), chip('side', 'Side by side')]
+  if (shown === 'side') {
+    const first = Math.max(0, versions.length - MAX_SIDE)
+    const shots: Shot[] = []
+    for (let i = first; i < versions.length; i++) {
+      const one = versions[i]!
+      const bytes = i === ownAt ? file.base64 : one.slot < 0 ? undefined : await readVersion($, path, one.slot, one.hash)
+      if (bytes) {
+        const pic = i === ownAt ? picOf(file) : diskPic(bytes)
+        shots.push(shot(i === ownAt ? 'Now' : `v${i + 1}`, pic))
+      }
+    }
+    const panes = Panes(ui, `${requestId}-side`, shots, wide(columns), 6, 3)
+    const note = first > 0 ? <Text dimColor>{`${first} older version(s) not shown`}</Text> : null
+    return Frame(
+      ui,
+      { title: stem, hint: hintOf(path), meta: `${versions.length} versions`, width: panes.width },
+      <Box flexDirection="row" gap={1}>{chips}</Box>,
+      ...(note ? [note] : []),
+      panes.tree,
+    )
+  }
   const controls = (
     <Box flexDirection="row" gap={1}>
+      {chips}
+      <Text dimColor>·</Text>
       <Button key="prev" plain label="◀" dimColor={at === 0} onPress={go(-1)} />
       <Button key="next" plain label="▶" dimColor={at === versions.length - 1} onPress={go(1)} />
       <Text dimColor>{at === ownAt ? 'as read here' : `older version, read here was v${ownAt + 1}`}</Text>

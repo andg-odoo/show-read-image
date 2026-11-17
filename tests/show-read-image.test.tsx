@@ -98,6 +98,12 @@ test('a read PNG is kept once per content and stepped through', async ($, on) =>
   await ui.press({ key: 'prev' })
   expect(await ui.find({ type: 'Text', text: /v1\/2/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /older version/ })).toBeDefined()
+  await ui.press({ key: 'view-side' })
+  expect(await ui.findAll({ type: 'Image' })).toHaveLength(2)
+  expect(await ui.find({ type: 'Text', text: 'Now' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'v1' })).toBeDefined()
+  await ui.press({ key: 'view-now' })
+  expect(await ui.findAll({ type: 'Image' })).toHaveLength(1)
   await ui.unmount()
 })
 
