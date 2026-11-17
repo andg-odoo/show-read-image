@@ -732,3 +732,67 @@ test('a video over a minute is sampled by seeking to each frame, not decoded who
   expect(ffmpeg.some(argv => argv.join(' ').includes('fps='))).toBe(false)
   expect(ffmpeg.at(-1)?.join(' ')).toContain('tile=2x4')
 })
+
+test('a picture that cannot be drawn says why instead of leaving a blank', async ($, on) => {
+  const huge = `iVBORw0KGgo${'A'.repeat(3_000_000)}`
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', () => ({ value: undefined }))
+  // No converter on this machine, and nothing else succeeds either
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/huge.png') {
+      return { value: { kind: 'file' as const, size: 20_000_000, mtimeMs: 1, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', () => ({ value: '' }))
+  on('tool.call', () => ({ result: { type: 'image', file: { base64: huge, type: 'image/png' } } }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  await $.tool.call({ tool: 'Read', file_path: '/s/huge.png', tool_use_id: 'nope' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  const row = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'nope',
+    viewport: { columns: 120, rows: 40 },
+    props: { tool_use_id: 'nope', tool: 'Read', input: { file_path: '/s/huge.png' }, isRunning: false, isErrored: false, isInterrupted: false, output: { type: 'image', file: { base64: huge, type: 'image/png' } } },
+  })
+  expect(await row.findAll({ type: 'Image' })).toHaveLength(0)
+  expect((await row.find({ type: 'Text', text: /⚠/ }))?.text).toContain('huge.png: 19.1 MB, too large to draw without sips, magick, convert or ffmpeg')
+  await row.unmount()
+})
+
+test('the converted folder keeps its newest files within 200 MB', async ($, on) => {
+  const removed: string[] = []
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', () => ({ value: undefined }))
+  on('process.run', (_, e) => {
+    if (e.argv[0] === 'rm') {
+      removed.push(...e.argv.slice(2))
+    }
+    const stdout = e.argv.join(' ').includes('command -v sips') ? '/usr/bin/sips' : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const dir = '/home/me/.cache/show-read-image/converted'
+  // Newest first by mtime: new (150 MB), mid (40 MB), old (30 MB); the old one takes the folder past 200 MB
+  const file = (name: string, megabytes: number, mtimeMs: number) => ({ name, kind: 'file' as const, size: megabytes * 1024 * 1024, mtimeMs, isLink: false })
+  on('fs.list', () => ({ value: [file('old.png', 30, 1), file('new.png', 150, 3), file('mid.png', 40, 2)] }))
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/photo.jpg' || e.path.startsWith(dir)) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 10, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', () => ({ value: { base64: RED } }))
+  await $.tool.call({ tool: 'mcp__show-read-image__show_images', tool_use_id: 'jpg', images: [{ path: '/s/photo.jpg' }] })
+  await new Promise<void>(done => setTimeout(done, 30))
+  expect(removed).toEqual([`${dir}/old.png`])
+})

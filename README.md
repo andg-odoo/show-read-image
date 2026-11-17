@@ -32,7 +32,8 @@ A Claude Code mod that draws images inline in the transcript, under the tool cal
 - **No duplicates.** A command's card is not drawn once a later Read shows the same picture.
 
 JPEGs, and PNGs over the 2 MiB an image may take, are converted and scaled down with whichever of `sips`, `magick`,
-`convert` or `ffmpeg` the machine has. Without one of them, those images get no card.
+`convert` or `ffmpeg` the machine has, into `~/.cache/show-read-image/converted/` (kept to its newest 200 MB). A
+picture that can't be drawn says why in a dim ⚠ line instead of leaving a blank.
 
 Verified in Ghostty inside tmux, without `CLAUDE_CODE_FORCE_TERMINAL_IMAGES`. A session hosted by `claude bg-pty-host`
 sees `TERM=xterm-256color` with no tmux or terminal variables, so it draws the `[image: ...]` alt text instead. Resume
