@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { addVersion, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
+import { addVersion, cellOf, fit, pack, pairOf, pngSize, sizeWarning } from '../hooks/logic'
 
 const RED = 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAECAIAAAA8r+mnAAAAEklEQVR4nGP4z8CAFWEXJUsCAFpeH+EeQoQoAAAAAElFTkSuQmCC'
 const BLUE = 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAECAIAAAA8r+mnAAAAEElEQVR4nGNgYPiPA1FNAgAanh/hASyMewAAAABJRU5ErkJggg=='
@@ -47,6 +47,17 @@ test('pairing, sizes, packing and versions', () => {
   }
   expect(entry.versions.length).toBe(10)
   expect(entry.versions[9]).toEqual({ hash: 'h11', at: 11, slot: 2 })
+})
+
+test('the cell shape comes from the tty and falls back to 2:1', () => {
+  expect(Math.round(cellOf('50 200 3400 1900')! * 1000)).toBe(2235)
+  expect(cellOf('50 200 0 0')).toBeUndefined()
+  expect(cellOf('')).toBeUndefined()
+  expect(cellOf('50 200 200 5000')).toBeUndefined()
+  // A taller cell needs fewer rows for the same picture
+  expect(fit({ width: 1000, height: 1000 }, 40, 100)).toEqual({ columns: 40, rows: 20 })
+  expect(fit({ width: 1000, height: 1000 }, 40, 100, 2.5)).toEqual({ columns: 40, rows: 16 })
+  expect(pack([1, 1], 100, 100, 6, Infinity, 2, 2.5)[0]![0]).toEqual({ index: 0, columns: 48, rows: 19 })
 })
 
 test('a read PNG is kept once per content and stepped through', async ($, on) => {

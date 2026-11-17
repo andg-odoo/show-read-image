@@ -90,13 +90,25 @@ export function sizeOf(file: PngFile) {
   return { width, height }
 }
 
-// A terminal cell is about twice as tall as it is wide
-export function fit(size: { width: number; height: number }, columns: number, maxRows: number) {
+// A cell's height over its width; most fonts are close to 2 when the terminal reports no pixel size
+export const DEFAULT_CELL = 2
+
+// TIOCGWINSZ printed as `rows columns xpixel ypixel`; tmux and some terminals report 0 pixels
+export function cellOf(winsize: string): number | undefined {
+  const [rows = 0, columns = 0, xpixel = 0, ypixel = 0] = winsize.trim().split(/\s+/).map(Number)
+  if (!(rows > 0 && columns > 0 && xpixel > 0 && ypixel > 0)) {
+    return undefined
+  }
+  const cell = ypixel / rows / (xpixel / columns)
+  return cell >= 1 && cell <= 4 ? cell : undefined
+}
+
+export function fit(size: { width: number; height: number }, columns: number, maxRows: number, cell = DEFAULT_CELL) {
   let cols = Math.max(1, columns)
-  let rows = Math.max(1, Math.round((cols * size.height) / size.width / 2))
+  let rows = Math.max(1, Math.round((cols * size.height) / size.width / cell))
   if (rows > maxRows) {
     rows = maxRows
-    cols = Math.max(1, Math.min(columns, Math.round((rows * 2 * size.width) / size.height)))
+    cols = Math.max(1, Math.min(columns, Math.round((rows * cell * size.width) / size.height)))
   }
   return { columns: cols, rows }
 }
@@ -104,10 +116,18 @@ export function fit(size: { width: number; height: number }, columns: number, ma
 export type Slot = { index: number; columns: number; rows: number }
 
 // Packs pictures into rows of one height, a new row once a picture would drop below minRows
-export function pack(aspects: number[], width: number, maxRows: number, minRows = 6, perRow = Infinity, gap = 2): Slot[][] {
+export function pack(
+  aspects: number[],
+  width: number,
+  maxRows: number,
+  minRows = 6,
+  perRow = Infinity,
+  gap = 2,
+  cell = DEFAULT_CELL,
+): Slot[][] {
   const heightOf = (row: number[]) => {
     const room = width - gap * (row.length - 1)
-    const cells = row.reduce((sum, i) => sum + 2 * aspects[i]!, 0)
+    const cells = row.reduce((sum, i) => sum + cell * aspects[i]!, 0)
     return Math.min(maxRows, Math.floor(room / cells))
   }
   const rows: number[][] = []
@@ -127,7 +147,7 @@ export function pack(aspects: number[], width: number, maxRows: number, minRows 
     return row.map(index => ({
       index,
       rows: height,
-      columns: Math.max(1, Math.min(width, Math.round(height * 2 * aspects[index]!))),
+      columns: Math.max(1, Math.min(width, Math.round(height * cell * aspects[index]!))),
     }))
   })
 }

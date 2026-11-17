@@ -4,9 +4,11 @@ import type { Elements, EngineInterface, Register, ToolGroupCall } from 'claude-
 import type { ShowReadImageHistory, ShowReadImageMode } from '../types'
 import {
   COMPACT,
+  DEFAULT_CELL,
   EXPANDED,
   WIDE,
   addVersion,
+  cellOf,
   fingerprint,
   fit,
   hashOf,
@@ -37,6 +39,8 @@ const step = atom({ plugin: 'show-read-image', key: 'step' } as const, -1)
 const mode = atom({ plugin: 'show-read-image', key: 'mode' } as const, 'both' as ShowReadImageMode)
 
 const MIN_FRAME = 30
+// The session's tty size in cells and pixels; a hook process has no tty of its own, so it opens /dev/tty
+const WINSIZE = `perl -e 'open(T, "</dev/tty") or exit 1; my $w = " " x 8; ioctl(T, ($^O eq "darwin" ? 0x40087468 : 0x5413), $w) or exit 1; print join(" ", unpack("S4", $w))'`
 const MAX_PNG = 2 * 1024 * 1024
 const UNKNOWN = { width: 16, height: 10 }
 const MODES: { mode: ShowReadImageMode; label: string }[] = [
@@ -52,6 +56,23 @@ const mates = new Map<string, string[]>()
 const versionBytes = new Map<string, string>()
 const diskBytes = new Map<string, { mtimeMs: number; base64: string }>()
 let home: string | undefined
+let cell = DEFAULT_CELL
+let measuredFor = ''
+
+// Once per viewport size: the cell shape changes with the font, not with every draw
+async function measure($: EngineInterface, viewport: { columns: number; rows: number } | undefined) {
+  const key = `${viewport?.columns}x${viewport?.rows}`
+  if (measuredFor === key) {
+    return
+  }
+  measuredFor = key
+  const ran = await $.process.run(['sh', '-c', WINSIZE]).catch(() => undefined)
+  const next = (ran?.exitCode === 0 ? cellOf(ran.stdout) : undefined) ?? DEFAULT_CELL
+  if (next !== cell) {
+    cell = next
+    $.ui.invalidate('ui.render')
+  }
+}
 
 function hashFor(id: string, base64: string) {
   const key = `${id}:${base64.length}`
@@ -157,7 +178,7 @@ function Frame(ui: Ui, at: { title: string; hint?: string; meta: string; width: 
 // Pictures packed into rows, each with a small title over it
 function Panes(ui: Ui, id: string, shots: Shot[], box: Box, minRows: number, perRow: number) {
   const { Box, Text, Image } = ui
-  const rows = pack(shots.map(shot => shot.size.width / shot.size.height), box.columns, box.rows, minRows, perRow)
+  const rows = pack(shots.map(shot => shot.size.width / shot.size.height), box.columns, box.rows, minRows, perRow, 2, cell)
   const width = Math.max(...rows.map(row => row.reduce((sum, slot) => sum + slot.columns, 0) + 2 * (row.length - 1)))
   const tree = (
     <Box flexDirection="column" gap={1}>
@@ -264,7 +285,7 @@ async function drawRead(
   }
   const version = versions[at]!
   const size = at === ownAt ? sizeOf(file) : (pngSize(base64) ?? sizeOf(file))
-  const cells = fit(size, box.columns, box.rows)
+  const cells = fit(size, box.columns, box.rows, cell)
   const hasHistory = versions.length > 1
   const meta = [pixels(size), hasHistory ? `v${at + 1}/${versions.length}` : '', hasHistory && version.at ? clock(version.at) : '']
     .filter(Boolean)
@@ -367,6 +388,7 @@ export const register: Register = on => {
     if (!isGallery) {
       return next({ ...e, props: { ...e.props, isExpanded: true } })
     }
+    void measure($, e.viewport)
     const ui = $.ui.resolve(e)
     const columns = e.viewport?.columns
     const line = await next(e)
@@ -404,6 +426,7 @@ export const register: Register = on => {
     if (pair?.side === 'before' && mates.get(e.requestId)?.includes(pair.after)) {
       return next(e)
     }
+    void measure($, e.viewport)
     const row = await next(e)
     const ui = $.ui.resolve(e)
     const tree = await drawRead($, ui, e.requestId, path, file, e.viewport?.columns)
@@ -421,6 +444,7 @@ export const register: Register = on => {
     if (!file || e.props.isErrored || e.surface !== 'terminal') {
       return next(e)
     }
+    void measure($, e.viewport)
     const ui = $.ui.resolve(e)
     const path = paths.get(e.requestId) ?? ''
     return drawRead($, ui, e.requestId, path, file, e.viewport?.columns, e.props.isExpanded)
