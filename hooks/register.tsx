@@ -24,6 +24,7 @@ import {
   otherImageOf,
   pathOf,
   pixels,
+  playerBox,
   pngOf,
   pngSize,
   sizeOf,
@@ -33,7 +34,8 @@ import {
   videoNote,
 } from './logic'
 import type { PngFile } from './logic'
-import { converter, filmstrip, openExternally, toPng, writeBytes } from './platform'
+import { converter, filmstrip, openExternally, playbackSource, toPng, writeBytes } from './platform'
+import { PLAYER_FPS, current as currentPlayback, playerKey, pause as pausePlayback, play, stop as stopPlayback } from './player'
 
 type Ui = Elements['terminal']
 type Box = { columns: number; rows: number }
@@ -275,9 +277,9 @@ function Controls(ui: Ui, ...groups: JSX.Element[][]) {
 }
 
 // Opens the Expand pane on this picture; `key` lets it step through the picture's versions
-function ExpandButton($: EngineInterface, ui: Ui, id: string, label: string, base64: string, key?: string, size?: Size) {
+function ExpandButton($: EngineInterface, ui: Ui, id: string, label: string, base64: string, key?: string, size?: Size, video?: string) {
   const hash = hashOf(base64)
-  const own = size ? { width: size.width, height: size.height } : {}
+  const own = { ...(size ? { width: size.width, height: size.height } : {}), ...(video ? { video } : {}) }
   return (
     <ui.Button
       key={`${id}-expand`}
@@ -450,7 +452,7 @@ async function drawRead(
   )
   const frame: FrameAt = { title: stem, hint: hintOf(path), meta, width: cells.columns, max: box.columns, actions: [
       ...(video ? [<Button key={`${requestId}-open`} plain dimColor label="open" onPress={() => openExternally($, video.path)} />] : []),
-      ExpandButton($, ui, requestId, stem, base64, path || undefined, size),
+      ExpandButton($, ui, requestId, stem, base64, path || undefined, size, video?.path),
     ] }
   // Frames the video tool didn't stamp with their time get the times in a row under the grid
   const samples = video?.samples ? [<Text key={`${requestId}-samples`} dimColor>{video.samples}</Text>] : []
@@ -880,6 +882,75 @@ async function cardsIn($: EngineInterface, calls: ReadonlyArray<ToolGroupCall>) 
   })
 }
 
+let resizeTimer: { cancel: () => void } | undefined
+let paneSize = ''
+
+// The last size the pane reported, for checking how a resize reaches the mod
+async function notePaneSize($: EngineInterface, columns: number, rows: number) {
+  const size = `${columns}x${rows}`
+  if (size !== paneSize) {
+    paneSize = size
+    await $.fs.write(`${await homeOf($)}/.cache/show-read-image/pane.txt`, `${size}\n`).catch(() => undefined)
+  }
+}
+let wantedBox: { width: number; height: number } | undefined
+
+// The Expand pane for a video: its filmstrip with [ play ], then live frames with pause, restart and the frame rate
+async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: number, video: string, label: string, strip: string) {
+  const { Box, Button, Image, Text } = ui
+  const playing = currentPlayback()
+  const p = playing?.video === video ? playing : undefined
+  if (playing && !p) {
+    stopPlayback($)
+  }
+  const box = playerBox(columns, rows, cellWidth, cell, 3)
+  const start = async (from: number, size = box) => {
+    const source = await playbackSource($, video, size, from, PLAYER_FPS, await convertedDir($))
+    if (!source) {
+      await $.ui.toast('show-read-image: playing a video needs clang on macOS, or ffmpeg')
+      return
+    }
+    play($, PANE, video, from, size, source)
+  }
+  // A resized pane decodes at its new size, from where it was, once the size has held for a moment: dragging the
+  // pane's edge redraws many times, and restarting on each would decode a burst of short runs
+  if (p?.status === 'playing' && p.box && (Math.abs(p.box.width - box.width) > 40 || Math.abs(p.box.height - box.height) > 40)) {
+    wantedBox = box
+    resizeTimer ??= $.clock.after(300, () => {
+      resizeTimer = undefined
+      const now = currentPlayback()
+      if (now && now.status === 'playing' && wantedBox) {
+        void start(now.position, wantedBox)
+      }
+    })
+  }
+  const frame = p?.first ?? p?.last
+  const picture = frame ?? strip
+  const cells = fit(pngSize(picture) ?? UNKNOWN, columns, Math.max(4, rows - 3), cell)
+  const status = !p
+    ? 'filmstrip'
+    : p.status === 'failed'
+      ? `failed: ${p.error || 'the decoder stopped'}`
+      : `${p.position.toFixed(1)} s · ${p.shownLastSecond} fps · ${p.dropped} dropped${p.status === 'ended' ? ' · ended' : p.status === 'paused' ? ' · paused' : ''}`
+  const isRunning = p?.status === 'playing' || p?.status === 'starting'
+  const toggle = isRunning
+    ? <Button key="player-pause" label="pause" onPress={() => pausePlayback($)} />
+    : <Button key="player-play" label="play" onPress={() => void start(p && p.status === 'paused' ? p.position : 0)} />
+  return (
+    <Box flexDirection="column">
+      {frame
+        ? <Image key={playerKey(cells.columns, cells.rows)} source={{ png: frame }} columns={cells.columns} rows={cells.rows} alt={`[video: ${label}]`} />
+        : <Image key={`player-strip-${cells.columns}x${cells.rows}`} source={{ png: strip }} columns={cells.columns} rows={cells.rows} alt={`[video: ${label}]`} />}
+      {Controls(
+        ui,
+        [<Text key="player-label" bold>{label}</Text>, <Text key="player-status" dimColor>{status}</Text>],
+        [toggle, <Button key="player-restart" label="restart" dimColor onPress={() => void start(0)} />],
+        [<Button key="pane-close" label="close" dimColor onPress={() => $.ui.close({ id: PANE })} />],
+      )}
+    </Box>
+  )
+}
+
 function readsOf(calls: ReadonlyArray<ToolGroupCall>): Read[] {
   return calls.flatMap((call, i) => {
     const file = pngOf(call.tool, call.output)
@@ -985,6 +1056,10 @@ export const register: Register = on => {
     if (!shown || !base64) {
       return <Text dimColor>Nothing to show: press ⤢ on a picture.</Text>
     }
+    void notePaneSize($, e.props.bodyColumns, e.props.scroll.bodyRows)
+    if (shown.video) {
+      return drawPlayer($, ui, e.props.bodyColumns, e.props.scroll.bodyRows, shown.video, shown.label, base64)
+    }
     const size = pngSize(base64) ?? UNKNOWN
     const cells = fit(size, e.props.bodyColumns, Math.max(4, e.props.scroll.bodyRows - 2), cell)
     const at = versions.findIndex(one => one.hash === shown.hash)
@@ -1007,7 +1082,7 @@ export const register: Register = on => {
           ]
         : []
     return (
-      <Box flexDirection="column" width={e.props.bodyColumns}>
+      <Box flexDirection="column">
         <Image key={`pane-${shown.hash.slice(0, 8)}-${cells.columns}x${cells.rows}`} source={{ png: base64 }} columns={cells.columns} rows={cells.rows} alt={`[image: ${shown.label}]`} />
         {Controls(
           ui,
@@ -1018,6 +1093,14 @@ export const register: Register = on => {
       </Box>
     )
   })
+
+  // Closing the pane, or expanding something else, stops a playing video
+  on('ui.close', async ($, e, next) => {
+    if (e.id === PANE) {
+      stopPlayback($)
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     const reads = readsOf(e.props.calls)

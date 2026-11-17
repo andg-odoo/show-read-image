@@ -2,6 +2,7 @@ import type { EngineInterface } from 'claude-code'
 
 import { SEEK_ABOVE_SECONDS, longestGap, sampleTimes, stripLayout } from './logic'
 import type { VideoStats } from './logic'
+import type { Source } from './player'
 
 // Image tools this machine has, looked up once a session: sips on macOS, ImageMagick or ffmpeg elsewhere
 type Converter = 'sips' | 'magick' | 'convert' | 'ffmpeg'
@@ -149,4 +150,42 @@ export async function filmstrip($: EngineInterface, video: string, out: string, 
 export async function openExternally($: EngineInterface, path: string) {
   const os = (await $.process.run(['uname', '-s']).catch(() => undefined))?.stdout.trim()
   await $.process.run([os === 'Darwin' ? 'open' : 'xdg-open', path]).catch(() => undefined)
+}
+
+// Where live frames come from: the Objective-C helper on macOS (AVFoundation; Swift can't stream stdout as simply),
+// compiled with clang on first use, or ffmpeg writing frames to files in real time elsewhere
+export async function playbackSource(
+  $: EngineInterface,
+  video: string,
+  box: { width: number; height: number },
+  from: number,
+  fps: number,
+  cache: string,
+): Promise<Source | undefined> {
+  const os = (await $.process.run(['uname', '-s']).catch(() => undefined))?.stdout.trim()
+  if (os === 'Darwin' && (await has($, 'clang'))) {
+    const bin = `${cache}/framestream`
+    if (!(await $.fs.exists(bin))) {
+      const frameworks = ['Foundation', 'AVFoundation', 'CoreMedia', 'CoreVideo', 'VideoToolbox', 'ImageIO', 'CoreGraphics'].flatMap(name => ['-framework', name])
+      const built = await $.process.run(['clang', '-O2', '-fobjc-arc', ...frameworks, `${$.plugin.root}/hooks/framestream.m`, '-o', bin], { timeoutMs: 120_000 })
+      if (built.exitCode !== 0) {
+        return undefined
+      }
+    }
+    return { kind: 'helper', argv: [bin, video, String(box.width), String(box.height), String(fps), from.toFixed(3)] }
+  }
+  if (!(await has($, 'ffmpeg'))) {
+    return undefined
+  }
+  // One playback at a time, so any play-* folder left by a crash or a killed session is stale
+  await $.process.run(['sh', '-c', 'rm -rf "$1"/play-*', 'sh', cache]).catch(() => undefined)
+  const dir = `${cache}/play-${Date.now().toString(36)}`
+  await $.process.run(['mkdir', '-p', dir])
+  const scale = `fps=${fps},scale=w=${box.width}:h=${box.height}:force_original_aspect_ratio=decrease`
+  return {
+    kind: 'files',
+    dir,
+    fps,
+    argv: ['ffmpeg', '-v', 'error', '-re', '-ss', from.toFixed(3), '-i', video, '-vf', scale, '-pix_fmt', 'rgb24', '-f', 'image2', '-start_number', '0', `${dir}/f%06d.png`],
+  }
 }
