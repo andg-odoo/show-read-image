@@ -1,5 +1,5 @@
 import { atom, memberOf, read, update } from 'claude-code'
-import type { Elements, EngineInterface, Register, ToolGroupCall } from 'claude-code'
+import type { Elements, EngineInterface, Register, ToolGroupCall, UiPressArgument } from 'claude-code'
 
 import type { ShowReadImageCard, ShowReadImageCardShot, ShowReadImageExpanded, ShowReadImageHistory, ShowReadImageMode, ShowReadImageView } from '../types'
 import {
@@ -74,9 +74,9 @@ const FALLBACK_CELL = { width: 10, height: 21 }
 const MAX_PNG = 2 * 1024 * 1024
 const UNKNOWN = { width: 16, height: 10 }
 const MODES: { mode: ShowReadImageMode; label: string }[] = [
-  { mode: 'both', label: 'side by side' },
-  { mode: 'after', label: 'after only' },
-  { mode: 'before', label: 'before only' },
+  { mode: 'both', label: 'Both' },
+  { mode: 'before', label: 'Before' },
+  { mode: 'after', label: 'After' },
 ]
 
 // Caches only spare work, a reload that empties them costs a re-read
@@ -249,53 +249,91 @@ function hintOf(path: string) {
   return dir ? `${splitPath(dir).name}/` : ''
 }
 
-type FrameAt = { title: string; hint?: string; meta: string; width: number; controls?: number; max: number; actions?: JSX.Element[] }
+// What a card's frame says: the title line, the body's width, and the footer under it
+type Footer = { left: JSX.Element[]; right: JSX.Element[]; width: number }
+type FrameAt = { title: string; hint?: string; meta: string; width: number; max: number; isUnread?: boolean; footer?: Footer }
 
-// Bracketed buttons draw as `[ label ]`, one column apart
-function buttonsWidth(labels: string[]) {
-  return labels.reduce((sum, label) => sum + label.length + 4, 0) + Math.max(0, labels.length - 1)
+const UNREAD_MARK = '◌ not read'
+
+// Labels set three columns apart, as a footer draws them
+function labelsWidth(labels: string[]) {
+  return labels.reduce((sum, label) => sum + label.length, 0) + 3 * Math.max(0, labels.length - 1)
 }
 
-// As wide as its widest line, picture, header or controls, so none of them is crushed; pictures keep their own size
+// As wide as its widest line, picture, title line or footer, so none of them is crushed; pictures keep their own size
 function frameWidth(at: FrameAt) {
-  const header = at.title.length + (at.hint ? at.hint.length + 1 : 0) + 2 + at.meta.length + (at.actions?.length ?? 0) * 5
-  return Math.min(at.max, Math.max(MIN_FRAME, at.width, header, at.controls ?? 0))
+  const header = at.title.length + (at.hint ? at.hint.length + 1 : 0) + (at.isUnread ? UNREAD_MARK.length + 2 : 0) + 2 + at.meta.length
+  return Math.min(at.max, Math.max(MIN_FRAME, at.width, header, at.footer?.width ?? 0))
 }
 
-// Control groups wrap as wholes, so `◀ v3/3 ▶` or a button never breaks apart
-function Controls(ui: Ui, ...groups: JSX.Element[][]) {
+// A quiet action: dim until pointed at, no brackets
+function Link(ui: Ui, key: string, label: string, onPress: (press: UiPressArgument) => unknown) {
+  return <ui.Button key={key} plain dimColor label={label} onPress={press => void onPress(press)} />
+}
+
+// One of a few views: the one showing is bold text, the others are links to it
+function Choice(ui: Ui, key: string, label: string, isActive: boolean, onPress: () => unknown) {
+  return isActive ? <ui.Text key={key} bold>{label}</ui.Text> : Link(ui, key, label, onPress)
+}
+
+// The footer's actions for one picture: Expand and View at full strength, then Save to Downloads and Copy path
+// where it has a file
+function pictureActions($: EngineInterface, ui: Ui, id: string, label: string, base64: string, path?: string, size?: Size, video?: string) {
+  const file = video ?? path
+  const fileActions = file
+    ? [
+        <ui.Button key={`${id}-open`} plain label="↗ View" onPress={() => void openExternally($, file)} />,
+        Link(ui, `${id}-save`, 'Save to Downloads', () => saveToDownloads($, file)),
+        Link(ui, `${id}-copy`, 'Copy path', async press => {
+          const copied = await $.ui.copy({ text: file, surface: press.surface })
+          await $.ui.toast(copied.isCopied ? 'Path copied' : 'Could not copy the path')
+        }),
+      ]
+    : []
+  const elements = [ExpandLink($, ui, id, label, base64, path, size, video, '⤢ Expand', false), ...fileActions]
+  const labels = ['⤢ Expand', ...(file ? ['↗ View', 'Save to Downloads', 'Copy path'] : [])]
+  return { elements, width: labelsWidth(labels) }
+}
+
+// A copy in ~/Downloads, numbered rather than overwriting one already there
+async function saveToDownloads($: EngineInterface, file: string) {
+  const folder = `${await homeOf($)}/Downloads`
+  const name = splitPath(file).name
+  const dot = name.lastIndexOf('.')
+  const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, '']
+  let out = `${folder}/${name}`
+  for (let n = 2; await $.fs.exists(out); n++) {
+    out = `${folder}/${stem} ${n}${ext}`
+  }
+  await $.process.run(['mkdir', '-p', folder]).catch(() => undefined)
+  const copied = await $.process.run(['cp', file, out]).catch(() => undefined)
+  await $.ui.toast(copied?.exitCode === 0 ? `Saved to Downloads/${splitPath(out).name}` : 'Could not save it to Downloads')
+}
+
+// Opens the Expand pane on this picture; `key` lets it step through the picture's versions
+function ExpandLink($: EngineInterface, ui: Ui, id: string, label: string, base64: string, key?: string, size?: Size, video?: string, text = '⤢ Expand', isDim = true) {
+  const hash = hashOf(base64)
+  const own = { ...(size ? { width: size.width, height: size.height } : {}), ...(video ? { video } : {}) }
+  const open = async () => {
+    remember(expandedBytes, hash, base64)
+    await update($, expanded, () => (key ? { label, hash, key, ...own } : { label, hash, ...own }))
+    await $.ui.open({ id: PANE, title: label })
+  }
+  return isDim ? Link(ui, `${id}-expand`, text, open) : <ui.Button key={`${id}-expand`} plain label={text} onPress={() => void open()} />
+}
+
+// A row with views or status on the left and actions on the right, each side kept whole
+function Bar(ui: Ui, left: JSX.Element[], right: JSX.Element[], marginTop = 0) {
   const { Box } = ui
   return (
-    <Box flexDirection="row" flexWrap="wrap" columnGap={3}>
-      {groups.map((group, i) => (
-        <Box key={`controls-${i}`} flexDirection="row" gap={1} flexShrink={0}>
-          {group}
-        </Box>
-      ))}
+    <Box flexDirection="row" justifyContent="space-between" flexWrap="wrap" columnGap={3} marginTop={marginTop}>
+      <Box flexDirection="row" columnGap={3} flexShrink={0}>{left}</Box>
+      <Box flexDirection="row" columnGap={3} flexShrink={0}>{right}</Box>
     </Box>
   )
 }
 
-// Opens the Expand pane on this picture; `key` lets it step through the picture's versions
-function ExpandButton($: EngineInterface, ui: Ui, id: string, label: string, base64: string, key?: string, size?: Size, video?: string) {
-  const hash = hashOf(base64)
-  const own = { ...(size ? { width: size.width, height: size.height } : {}), ...(video ? { video } : {}) }
-  return (
-    <ui.Button
-      key={`${id}-expand`}
-      plain
-      label="⤢"
-      dimColor
-      onPress={async () => {
-        remember(expandedBytes, hash, base64)
-        await update($, expanded, () => (key ? { label, hash, key, ...own } : { label, hash, ...own }))
-        await $.ui.open({ id: PANE, title: label })
-      }}
-    />
-  )
-}
-
-// The rounded dim border with its title bar: bold title, dim folder hint, dim meta on the right
+// The rounded dim border: the title line, the body, and a footer with views on the left and actions on the right
 function Frame(ui: Ui, at: FrameAt, ...body: JSX.Element[]) {
   const { Box, Text } = ui
   return (
@@ -304,18 +342,17 @@ function Frame(ui: Ui, at: FrameAt, ...body: JSX.Element[]) {
         <Box flexDirection="row" gap={1} flexShrink={1}>
           <Text bold wrap="truncate-end">{at.title}</Text>
           {at.hint ? <Text dimColor wrap="truncate-start">{at.hint}</Text> : null}
+          {at.isUnread ? <Text dimColor italic>{`  ${UNREAD_MARK}`}</Text> : null}
         </Box>
-        <Box flexDirection="row" gap={1} flexShrink={0}>
-          <Text dimColor wrap="truncate-end">{at.meta}</Text>
-          {at.actions ?? null}
-        </Box>
+        <Text dimColor wrap="truncate-end">{at.meta}</Text>
       </Box>
       {body}
+      {at.footer ? Bar(ui, at.footer.left, at.footer.right, 1) : null}
     </Box>
   )
 }
 
-// Pictures packed into rows, each with a small title over it
+// Pictures packed into rows, each captioned underneath with its label and size, and its own ⤢
 function Panes($: EngineInterface, ui: Ui, id: string, shots: Shot[], box: Box, minRows: number, perRow: number) {
   const { Box, Text, Image } = ui
   const natives = shots.map(shot => nativeColumns(shot.size.width, cellWidth))
@@ -327,16 +364,9 @@ function Panes($: EngineInterface, ui: Ui, id: string, shots: Shot[], box: Box, 
         <Box key={`${id}-row-${r}`} flexDirection="row" gap={2}>
           {row.map(slot => {
             const shot = shots[slot.index]!
-            const hasMeta = slot.columns >= shot.title.length + shot.meta.length + 3
+            const hasMeta = slot.columns >= shot.title.length + shot.meta.length + 6
             return (
               <Box key={`${id}-pane-${slot.index}`} flexDirection="column" width={slot.columns}>
-                <Box flexDirection="row" justifyContent="space-between" gap={1}>
-                  <Text bold wrap="truncate-end">{shot.title}</Text>
-                  <Box flexDirection="row" gap={1} flexShrink={0}>
-                    {hasMeta ? <Text dimColor>{shot.meta}</Text> : null}
-                    {ExpandButton($, ui, `${id}-pane-${slot.index}`, shot.title, shot.base64, shot.key, shot.size)}
-                  </Box>
-                </Box>
                 <Image
                   key={`${id}-img-${slot.index}-${slot.columns}x${slot.rows}-${fingerprint(shot.base64).slice(0, 8)}`}
                   source={{ png: shot.base64 }}
@@ -344,6 +374,13 @@ function Panes($: EngineInterface, ui: Ui, id: string, shots: Shot[], box: Box, 
                   rows={slot.rows}
                   alt={`[image: ${shot.title}]`}
                 />
+                <Box flexDirection="row" justifyContent="space-between" gap={1}>
+                  <Box flexDirection="row" gap={1} flexShrink={1}>
+                    <Text wrap="truncate-end">{shot.title}</Text>
+                    {hasMeta ? <Text dimColor>{`· ${shot.meta}`}</Text> : null}
+                  </Box>
+                  {ExpandLink($, ui, `${id}-pane-${slot.index}`, shot.title, shot.base64, shot.key, shot.size, undefined, '⤢')}
+                </Box>
               </Box>
             )
           })}
@@ -367,7 +404,6 @@ function diskPic(base64: string): Pic {
 }
 
 async function drawPair($: EngineInterface, ui: Ui, requestId: string, pair: Pair, box: Box) {
-  const { Box, Button } = ui
   const shown = await read($, memberOf(mode, { requestId }))
   const sides = [
     ...(shown !== 'after' ? [shot('Before', pair.before)] : []),
@@ -375,21 +411,12 @@ async function drawPair($: EngineInterface, ui: Ui, requestId: string, pair: Pai
   ]
   // Keyed by the drawing's own id: a group can hold this pair twice, from a Read and from the command that made it
   const panes = Panes($, ui, `${requestId}-${pair.stem}`, sides, box, 1, 2)
-  const meta = ['before | after', sizeWarning(pair.before.size, pair.after.size)].filter(Boolean).join(' · ')
-  const controls = Controls(
-    ui,
-    MODES.map(one => (
-        <Button
-          key={`mode-${one.mode}-${pair.stem}`}
-          label={one.label}
-          variant={one.mode === shown ? 'primary' : undefined}
-          dimColor={one.mode !== shown}
-          onPress={() => update($, memberOf(mode, { requestId }), () => one.mode)}
-        />
-      )),
+  const meta = sizeWarning(pair.before.size, pair.after.size) || 'before and after'
+  const choices = MODES.map(one =>
+    Choice(ui, `mode-${one.mode}-${pair.stem}`, one.label, one.mode === shown, () => update($, memberOf(mode, { requestId }), () => one.mode)),
   )
-  const at = { title: pair.stem, hint: pair.hint, meta, width: panes.width, controls: buttonsWidth(MODES.map(one => one.label)), max: box.columns }
-  return Frame(ui, at, controls, panes.tree)
+  const footer = { left: choices, right: [], width: labelsWidth(MODES.map(one => one.label)) }
+  return Frame(ui, { title: pair.stem, hint: pair.hint, meta, width: panes.width, max: box.columns, footer }, panes.tree)
 }
 
 // A lone PNG read: its pair when the before file is on disk, else the picture and its versions
@@ -404,7 +431,7 @@ async function drawRead(
   isUnread?: boolean,
   video?: { note: string; path: string; samples?: string },
 ) {
-  const { Box, Button, Image, Text } = ui
+  const { Image, Text } = ui
   const box = room(columns, isExpanded)
   const pair = pairOf(path)
   if (pair?.side === 'after') {
@@ -436,7 +463,12 @@ async function drawRead(
   const size = at === ownAt ? sizeOf(file) : (pngSize(base64) ?? sizeOf(file))
   const cells = fit(size, box.columns, box.rows, cell, nativeColumns(size.width, cellWidth))
   const hasHistory = versions.length > 1
-  const meta = [isUnread ? UNREAD : '', !isKept && saved.length > 0 ? 'older than the kept versions' : '', video?.note ?? pixels(size), hasHistory && version.at ? clock(version.at) : '']
+  const meta = [
+    !isKept && saved.length > 0 ? 'older than the kept versions' : '',
+    at !== ownAt ? `earlier version, this row read v${ownAt + 1}` : '',
+    video?.note ?? pixels(size),
+    hasHistory && version.at ? clock(version.at) : '',
+  ]
     .filter(Boolean)
     .join(' · ')
   const go = (by: number) => () =>
@@ -450,26 +482,16 @@ async function drawRead(
       alt={`[image: ${stem}]`}
     />
   )
-  const frame: FrameAt = { title: stem, hint: hintOf(path), meta, width: cells.columns, max: box.columns, actions: [
-      ...(video ? [<Button key={`${requestId}-open`} plain dimColor label="open" onPress={() => openExternally($, video.path)} />] : []),
-      ExpandButton($, ui, requestId, stem, base64, path || undefined, size, video?.path),
-    ] }
+  const actions = pictureActions($, ui, requestId, stem, base64, path || undefined, size, video?.path)
   // Frames the video tool didn't stamp with their time get the times in a row under the grid
   const samples = video?.samples ? [<Text key={`${requestId}-samples`} dimColor>{video.samples}</Text>] : []
+  const frame: FrameAt = { title: stem, hint: hintOf(path), meta, width: cells.columns, max: box.columns, isUnread: isUnread === true }
   if (!hasHistory) {
-    return Frame(ui, frame, image, ...samples)
+    return Frame(ui, { ...frame, footer: { left: [], right: actions.elements, width: actions.width } }, image, ...samples)
   }
   const shown = await read($, memberOf(view, { requestId }))
-  const chip = (to: ShowReadImageView, label: string) => (
-    <Button
-      key={`view-${to}`}
-      label={label}
-      variant={shown === to ? 'primary' : undefined}
-      dimColor={shown !== to}
-      onPress={() => update($, memberOf(view, { requestId }), () => to)}
-    />
-  )
-  const chips = [chip('now', 'now'), chip('side', 'side by side')]
+  const setView = (to: ShowReadImageView) => () => update($, memberOf(view, { requestId }), () => to)
+  const views = [Choice(ui, 'view-now', 'One', shown !== 'side', setView('now')), Choice(ui, 'view-side', 'All versions', shown === 'side', setView('side'))]
   if (shown === 'side') {
     const first = Math.max(0, versions.length - MAX_SIDE)
     const shots: Shot[] = []
@@ -483,28 +505,24 @@ async function drawRead(
     }
     const panes = Panes($, ui, `${requestId}-side`, shots, wide(columns), 6, 3)
     const note = first > 0 ? <Text dimColor>{`${first} older version(s) not shown`}</Text> : null
+    const footer = { left: views, right: [], width: labelsWidth(['One', 'All versions']) }
     return Frame(
       ui,
-      { title: stem, hint: hintOf(path), meta: `${versions.length} versions`, width: panes.width, controls: buttonsWidth(['now', 'side by side']), max: wide(columns).columns },
-      Controls(ui, chips),
+      { ...frame, meta: `${versions.length} versions`, width: panes.width, max: wide(columns).columns, footer },
       ...(note ? [note] : []),
       panes.tree,
     )
   }
-  const position = `v${at + 1}/${versions.length}`
-  const note = at === ownAt ? 'as read here' : `older version, read here was v${ownAt + 1}`
-  const controls = Controls(
-    ui,
-    chips,
-    [
-      <Button key="prev" plain label="◀" dimColor={at === 0} onPress={go(-1)} />,
-      <Text key="position">{position}</Text>,
-      <Button key="next" plain label="▶" dimColor={at === versions.length - 1} onPress={go(1)} />,
-    ],
-    [<Text key="note" dimColor>{note}</Text>],
+  const position = `${at + 1} of ${versions.length}`
+  const stepper = (
+    <ui.Box key="stepper" flexDirection="row" gap={1}>
+      <ui.Button key="prev" plain label="◀" dimColor={at === 0} onPress={go(-1)} />
+      <Text>{position}</Text>
+      <ui.Button key="next" plain label="▶" dimColor={at === versions.length - 1} onPress={go(1)} />
+    </ui.Box>
   )
-  const width = buttonsWidth(['now', 'side by side']) + 3 + position.length + 4 + 3 + note.length
-  return Frame(ui, { ...frame, controls: width }, controls, image, ...samples)
+  const footer = { left: [stepper, ...views], right: actions.elements, width: position.length + 4 + 3 + labelsWidth(['One', 'All versions']) + 3 + actions.width }
+  return Frame(ui, { ...frame, footer }, image, ...samples)
 }
 
 // A group's before/after pairs, an after read pairing with its before on disk, and the rest
@@ -847,31 +865,34 @@ async function drawPictures($: EngineInterface, ui: Ui, id: string, card: ShowRe
       : undefined
     return drawRead($, ui, id, only.shot.key, dimensions ? { base64: only.base64, dimensions } : { base64: only.base64 }, columns, false, only.shot.isUnread, video)
   }
-  const { Box, Button } = ui
   const chosen = await read($, memberOf(pick, { requestId: id }))
   const at = chosen >= 0 && chosen < pictures.length ? chosen : -1
   const choose = (to: number) => () => update($, memberOf(pick, { requestId: id }), () => to)
-  const chip = (to: number, label: string) => (
-    <Button key={`pick-${to}`} label={label} variant={at === to ? 'primary' : undefined} dimColor={at !== to} onPress={choose(to)} />
-  )
   const isPair = pictures.length === 2
-  const chips =
+  // Two compare as both or either one; more compare each against the first
+  const options: { to: number; label: string }[] =
     pictures.length < 2
       ? []
-      : [
-          chip(-1, isPair ? 'side by side' : 'all'),
-          ...pictures.map((one, i) => (isPair ? chip(i, `${one.shot.label} only`) : i === 0 ? null : chip(i, `vs ${one.shot.label}`))),
-        ].filter(one => one !== null)
+      : isPair
+        ? [{ to: -1, label: 'Both' }, ...pictures.map((one, i) => ({ to: i, label: one.shot.label }))]
+        : [{ to: -1, label: 'All' }, ...pictures.slice(1).map((one, i) => ({ to: i + 1, label: `vs ${one.shot.label}` }))]
+  const chips = options.map(one => Choice(ui, `pick-${one.to}`, one.label, at === one.to, choose(one.to)))
   const shown = at < 0 ? pictures : isPair ? [pictures[at]!] : [pictures[0]!, pictures[at]!]
   const tile = (one: (typeof pictures)[number]) => ({ ...shot(one.shot.label, diskPic(one.base64)), ...(one.shot.isVideo ? { meta: 'video' } : {}) })
   const panes = Panes($, ui, `${id}-card`, shown.map(tile), wide(columns), 6, isPair || at >= 0 ? 2 : 3)
-  const meta = [pictures.some(one => one.shot.isUnread) ? UNREAD : '', pictures.length > 1 ? `${pictures.length} images` : pixels(diskPic(only.base64).size)]
-    .filter(Boolean)
-    .join(' · ')
-  const labels = pictures.length < 2 ? [] : isPair ? ['side by side', ...pictures.map(one => `${one.shot.label} only`)] : ['all', ...pictures.slice(1).map(one => `vs ${one.shot.label}`)]
-  const controls = chips.length > 0 ? [Controls(ui, chips)] : []
-  const frame: FrameAt = { title: card.title ?? only.shot.label, meta, width: panes.width, controls: buttonsWidth(labels), max: wide(columns).columns }
-  return Frame(ui, frame, ...controls, panes.tree)
+  const meta = pictures.length > 1 ? `${pictures.length} images` : pixels(diskPic(only.base64).size)
+  const paths = pictures.map(one => one.shot.key).filter(key => key.startsWith('/'))
+  const copy = paths.length > 0 ? [Link(ui, `${id}-copy`, 'Copy paths', press => $.ui.copy({ text: paths.join('\n'), surface: press.surface }))] : []
+  const footer = { left: chips, right: copy, width: labelsWidth(options.map(one => one.label)) + (copy.length > 0 ? 3 + 'Copy paths'.length : 0) }
+  const frame: FrameAt = {
+    title: card.title ?? only.shot.label,
+    meta,
+    width: panes.width,
+    max: wide(columns).columns,
+    isUnread: pictures.some(one => one.shot.isUnread),
+    footer,
+  }
+  return Frame(ui, frame, panes.tree)
 }
 
 async function cardsIn($: EngineInterface, calls: ReadonlyArray<ToolGroupCall>) {
@@ -934,18 +955,17 @@ async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: num
       : `${p.position.toFixed(1)} s · ${p.shownLastSecond} fps · ${p.dropped} dropped${p.status === 'ended' ? ' · ended' : p.status === 'paused' ? ' · paused' : ''}`
   const isRunning = p?.status === 'playing' || p?.status === 'starting'
   const toggle = isRunning
-    ? <Button key="player-pause" label="pause" onPress={() => pausePlayback($)} />
-    : <Button key="player-play" label="play" onPress={() => void start(p && p.status === 'paused' ? p.position : 0)} />
+    ? <Button key="player-pause" plain label="▮▮ Pause" onPress={() => pausePlayback($)} />
+    : <Button key="player-play" plain label="▶ Play" onPress={() => void start(p && p.status === 'paused' ? p.position : 0)} />
   return (
     <Box flexDirection="column">
       {frame
         ? <Image key={playerKey(cells.columns, cells.rows)} source={{ png: frame }} columns={cells.columns} rows={cells.rows} alt={`[video: ${label}]`} />
         : <Image key={`player-strip-${cells.columns}x${cells.rows}`} source={{ png: strip }} columns={cells.columns} rows={cells.rows} alt={`[video: ${label}]`} />}
-      {Controls(
+      {Bar(
         ui,
-        [<Text key="player-label" bold>{label}</Text>, <Text key="player-status" dimColor>{status}</Text>],
-        [toggle, <Button key="player-restart" label="restart" dimColor onPress={() => void start(0)} />],
-        [<Button key="pane-close" label="close" dimColor onPress={() => $.ui.close({ id: PANE })} />],
+        [toggle, <Text key="player-label" bold>{label}</Text>, <Text key="player-status" dimColor>{status}</Text>],
+        [Link(ui, 'player-restart', '↺ Restart', () => start(0)), Link(ui, 'pane-close', 'Close', () => $.ui.close({ id: PANE }))],
       )}
     </Box>
   )
@@ -1077,18 +1097,21 @@ export const register: Register = on => {
       at >= 0 && versions.length > 1
         ? [
             <Button key="pane-prev" plain label="◀" dimColor={at === 0} onPress={step(-1)} />,
-            <Text key="pane-at">{`v${at + 1}/${versions.length}`}</Text>,
+            <Text key="pane-at">{`${at + 1} of ${versions.length}`}</Text>,
             <Button key="pane-next" plain label="▶" dimColor={at === versions.length - 1} onPress={step(1)} />,
           ]
         : []
     return (
       <Box flexDirection="column">
         <Image key={`pane-${shown.hash.slice(0, 8)}-${cells.columns}x${cells.rows}`} source={{ png: base64 }} columns={cells.columns} rows={cells.rows} alt={`[image: ${shown.label}]`} />
-        {Controls(
+        {Bar(
           ui,
-          [<Text key="pane-label" bold>{shown.label}</Text>, <Text key="pane-size" dimColor>{pixels(shown.width && shown.height ? { width: shown.width, height: shown.height } : size)}</Text>],
-          ...(stepper.length > 0 ? [stepper] : []),
-          [<Button key="pane-close" label="close" dimColor onPress={() => $.ui.close({ id: PANE })} />],
+          [
+            <Text key="pane-label" bold>{shown.label}</Text>,
+            <Text key="pane-size" dimColor>{pixels(shown.width && shown.height ? { width: shown.width, height: shown.height } : size)}</Text>,
+            ...(stepper.length > 0 ? [<Box key="pane-stepper" flexDirection="row" gap={1}>{stepper}</Box>] : []),
+          ],
+          [Link(ui, 'pane-close', 'Close', () => $.ui.close({ id: PANE }))],
         )}
       </Box>
     )

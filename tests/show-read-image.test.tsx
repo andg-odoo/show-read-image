@@ -113,14 +113,14 @@ test('a read PNG is kept once per content and stepped through', async ($, on) =>
     viewport: { columns: 120, rows: 40 },
     props: call('read-2', '/s/shot.png', BLUE),
   })
-  expect(await ui.find({ type: 'Text', text: 'v2/2' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '2 of 2' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /8×4/ })).toBeDefined()
   await ui.press({ key: 'prev' })
-  expect(await ui.find({ type: 'Text', text: /v1\/2/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /older version/ })).toBeDefined()
-  // The frame fits its controls, `[ now ] [ side by side ]   ◀ v1/2 ▶   older version, …`, not just the 8×4 picture
+  expect(await ui.find({ type: 'Text', text: '1 of 2' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /earlier version/ })).toBeDefined()
+  // The frame fits its footer, `◀ 1 of 2 ▶   One   All versions   ⤢ Expand   ↗ View   Save to Downloads   Copy path`, not just the 8×4 picture
   const frame = (await ui.findAll({ type: 'Box' })).find(found => found.props.borderStyle === 'round')
-  expect(Number(frame?.props.width)).toBeGreaterThanOrEqual(24 + 3 + 8 + 3 + 'older version, read here was v2'.length + 4)
+  expect(Number(frame?.props.width)).toBeGreaterThanOrEqual('◀ 1 of 2 ▶   One   All versions   ⤢ Expand   ↗ View   Save to Downloads   Copy path'.length + 4)
   await ui.press({ key: 'view-side' })
   expect(await ui.findAll({ type: 'Image' })).toHaveLength(2)
   expect(await ui.find({ type: 'Text', text: 'Now' })).toBeDefined()
@@ -150,7 +150,7 @@ test('a group of a before and an after read draws one pair with its toggle', asy
     },
   })
   expect(await ui.find({ type: 'Text', text: 'engine line' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'before | after' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'before and after' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /sizes differ/ })).toBeUndefined()
   expect(await ui.findAll({ type: 'Image' })).toHaveLength(2)
   await ui.press({ key: 'mode-after-shot' })
@@ -180,10 +180,12 @@ test('a mixed group draws its pair frame first, then a gallery of the rest', asy
     viewport: { columns: 120, rows: 40 },
     props: { calls, isActive: false, isExpanded: false },
   })
-  expect((await group.find({ type: 'Text', text: /before \| after/ }))?.text).toContain('sizes differ (8×4 vs 4×4)')
+  expect((await group.find({ type: 'Text', text: /sizes differ/ }))?.text).toBe('sizes differ (8×4 vs 4×4)')
   expect(await group.find({ type: 'Text', text: '2 images' })).toBeDefined()
   expect(await group.findAll({ type: 'Image' })).toHaveLength(4)
-  expect((await group.findAll({ type: 'Button' })).filter(found => found.key?.startsWith('mode-'))).toHaveLength(3)
+  // The view showing is bold text; the other two are buttons to it
+  expect((await group.findAll({ type: 'Button' })).filter(found => found.key?.startsWith('mode-'))).toHaveLength(2)
+  expect(await group.find({ type: 'Text', text: 'Both' })).toBeDefined()
   await group.unmount()
 
   // In ctrl+o rows the before row draws no picture of its own
@@ -266,7 +268,8 @@ test('a screenshot a Bash command wrote draws under its row, marked as not read'
     image = await ui.find({ type: 'Image' })
   }
   expect(image).toBeDefined()
-  expect((await ui.find({ type: 'Text', text: /not read by the agent/ }))?.text).toContain('8×4')
+  expect(await ui.find({ type: 'Text', text: /not read/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '8×4' })).toBeDefined()
   await ui.unmount()
 
   // Once a Read shows the same picture, the command's card draws nothing
@@ -335,7 +338,8 @@ test('show_images draws a titled, unread card and can step back a version', asyn
   expect(String(first.result)).toContain('Shown 2 image(s)')
   const card = await mount('show-1')
   expect(await card.find({ type: 'Text', text: 'Before and after' })).toBeDefined()
-  expect((await card.find({ type: 'Text', text: /not read by the agent/ }))?.text).toContain('2 images')
+  expect(await card.find({ type: 'Text', text: /not read/ })).toBeDefined()
+  expect(await card.find({ type: 'Text', text: '2 images' })).toBeDefined()
   expect(await card.findAll({ type: 'Image' })).toHaveLength(2)
   await card.unmount()
 
@@ -343,8 +347,8 @@ test('show_images draws a titled, unread card and can step back a version', asyn
   edits += 1
   await $.tool.call({ tool, tool_use_id: 'show-2', images: [{ path: '/s/a.png', version: -1, label: 'previous' }] })
   const back = await mount('show-2')
-  expect(await back.find({ type: 'Text', text: 'v1/2' })).toBeDefined()
-  expect(await back.find({ type: 'Text', text: /not read by the agent/ })).toBeDefined()
+  expect(await back.find({ type: 'Text', text: '1 of 2' })).toBeDefined()
+  expect(await back.find({ type: 'Text', text: /not read/ })).toBeDefined()
 
   expect((await back.findAll({ type: 'Image' })).map(found => (found.props.source as { png?: string }).png)).toEqual([RED])
   const clamped = await $.tool.call({ tool, tool_use_id: 'show-4', images: [{ path: '/s/a.png', version: -5 }] })
@@ -469,7 +473,7 @@ test('a command that printed the pair a group then reads draws it once', async (
       isExpanded: false,
     },
   })
-  expect(await group.find({ type: 'Text', text: 'before | after' })).toBeDefined()
+  expect(await group.find({ type: 'Text', text: 'before and after' })).toBeDefined()
   expect(await group.findAll({ type: 'Image' })).toHaveLength(2)
   await group.unmount()
 })
@@ -527,7 +531,7 @@ test('⤢ opens a pane that fills its room and steps through versions', async ($
   expect(picture?.props.columns).toBe(80)
   expect(picture?.props.rows).toBe(19)
   expect((picture?.props.source as { png?: string }).png).toBe(BLUE)
-  expect(await pane.find({ type: 'Text', text: 'v2/2' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: '2 of 2' })).toBeDefined()
   await pane.press({ key: 'pane-prev' })
   expect(((await pane.findAll({ type: 'Image' }))[0]?.props.source as { png?: string }).png).toBe(RED)
   await pane.unmount()
@@ -572,7 +576,7 @@ test('a Read that came back as JPEG still draws, at the file\'s own size', async
   })
   expect((await row.findAll({ type: 'Image' })).map(found => (found.props.source as { png?: string }).png)).toEqual([RED])
   expect(await row.find({ type: 'Text', text: /1206×2622/ })).toBeDefined()
-  expect(await row.find({ type: 'Text', text: /not read by the agent/ })).toBeUndefined()
+  expect(await row.find({ type: 'Text', text: /not read/ })).toBeUndefined()
   await row.unmount()
 })
 
@@ -638,7 +642,8 @@ test('a video is summed up by its length, frame count and longest gap between fr
   expect(isVideoPath('/t/shot.png')).toBe(false)
   expect(longestGap([0, 0.5, 2.1, 2.2])).toEqual({ gap: 1.6, gapAt: 2.1 })
   expect(longestGap([])).toEqual({ gap: 0, gapAt: 0 })
-  expect(videoNote({ duration: 9.6, frames: 159, gap: 1.615, gapAt: 1.61 })).toBe('9.60 s · 159 frames · longest gap 1.61 s at 1.61 s')
+  expect(videoNote({ duration: 9.6, frames: 159, gap: 1.615, gapAt: 1.61 })).toBe('0:09.6 · 159 frames · longest hold 1.6 s at 0:01.6')
+  expect(videoNote({ duration: 75, frames: 2250, gap: 0.03, gapAt: 0.5 })).toBe('1:15.0 · 2250 frames')
   expect(stripLayout(1206, 2622)).toEqual({ columns: 4, rows: 2, cellHeight: 480 })
   expect(stripLayout(1920, 1080)).toEqual({ columns: 2, rows: 4, cellHeight: 270 })
   expect(imagePathsIn('Recording saved to /tmp/rec.mov')).toEqual(['/tmp/rec.mov'])
@@ -692,7 +697,7 @@ test('show_images draws a video as its filmstrip, with its timing and an open bu
     viewport: { columns: 120, rows: 40 },
     props: { tool_use_id: 'vid', tool: 'mcp__show-read-image__show_images', input: {}, isRunning: false, isErrored: false, isInterrupted: false, output: '' },
   })
-  expect(await card.find({ type: 'Text', text: /2\.50 s · 4 frames · longest gap 1\.60 s at 2\.10 s/ })).toBeDefined()
+  expect(await card.find({ type: 'Text', text: /0:02\.5 · 4 frames · longest hold 1\.6 s at 0:02\.1/ })).toBeDefined()
   expect(await card.find({ type: 'Text', text: 'frames at 0.0 0.3 0.6 0.9 1.3 1.6 1.9 2.2 s' })).toBeDefined()
   await card.press({ key: 'vid-open' })
   expect(ran.some(argv => argv[0] === 'xdg-open' && argv[1] === '/s/clip.mov')).toBe(true)

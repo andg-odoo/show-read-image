@@ -356,12 +356,17 @@ export function longestGap(times: number[]): { gap: number; gapAt: number } {
   return { gap, gapAt }
 }
 
-function seconds(n: number) {
-  return `${n < 10 ? n.toFixed(2) : n.toFixed(1)} s`
+// A time in a clip as m:ss.s, or m:ss where `whole`
+export function clockOf(t: number, whole = false) {
+  const minutes = Math.floor(t / 60)
+  const rest = t - minutes * 60
+  return `${minutes}:${(whole ? Math.floor(rest).toString() : rest.toFixed(1)).padStart(whole ? 2 : 4, '0')}`
 }
 
+// The clip in words: its length and frames, and where it held still longest when that was over half a second
 export function videoNote(stats: VideoStats) {
-  return `${seconds(stats.duration)} · ${stats.frames} frames · longest gap ${seconds(stats.gap)} at ${seconds(stats.gapAt)}`
+  const hold = stats.gap >= 0.5 ? ` · longest hold ${stats.gap.toFixed(1)} s at ${clockOf(stats.gapAt)}` : ''
+  return `${clockOf(stats.duration)} · ${stats.frames} frames${hold}`
 }
 
 // Eight frames: four across for a tall video, two across for a wide one

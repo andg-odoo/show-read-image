@@ -27,6 +27,9 @@ A Claude Code mod that draws images inline in the transcript, under the tool cal
   position, frames shown per second and frames dropped. `pause`, `restart`, and a resize decodes at the new size.
   Frames come from an Objective-C/AVFoundation helper on macOS (compiled with clang on first use), or from ffmpeg
   writing them to files in real time elsewhere.
+- **Actions.** Each card's footer has `⤢ Expand`, `↗ View` (the system viewer), `Save to Downloads` and `Copy path`, and
+  on the left the card's views (`Both  Before  After`, `All  vs B`, `◀ 2 of 3 ▶  One  All versions`), the one showing
+  in bold.
 - **Expand.** ⤢ on any picture opens it in a pane beside the chat, as large as the pane allows, with ◀ ▶ through
   its versions when it has any.
 - **One way to compare.** A card with several images has `[ side by side ] [ A only ] [ B only ]` for two, and
