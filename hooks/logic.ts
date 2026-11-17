@@ -9,19 +9,33 @@ export type PngFile = { base64: string; dimensions?: Record<string, number | und
 
 type ReadImage = { type?: string; file?: { base64?: string; type?: string; dimensions?: Record<string, number> } }
 
+// The most an Image takes, decoded
+export const MAX_PNG_BYTES = 2 * 1024 * 1024
+
+export function decodedBytes(base64: string) {
+  return Math.floor((base64.length * 3) / 4)
+}
+
+// A Read result drawn as it is: a PNG small enough for an Image
 export function pngOf(tool: string, output: unknown): PngFile | undefined {
   const result = output as ReadImage | undefined
   if (tool !== 'Read' || result?.type !== 'image' || result.file?.type !== 'image/png' || !result.file.base64) {
     return undefined
   }
+  if (decodedBytes(result.file.base64) > MAX_PNG_BYTES) {
+    return undefined
+  }
   return { base64: result.file.base64, dimensions: result.file.dimensions }
 }
 
-// A Read result that is an image but not a PNG: Read re-encodes pictures too large to send as they are
+// A Read result that is an image an Image can't take as it is: another format, or a PNG over 2 MiB
 export function otherImageOf(tool: string, output: unknown): (PngFile & { type: string }) | undefined {
   const result = output as ReadImage | undefined
   const type = result?.file?.type ?? ''
-  if (tool !== 'Read' || result?.type !== 'image' || !type.startsWith('image/') || type === 'image/png' || !result.file?.base64) {
+  if (tool !== 'Read' || result?.type !== 'image' || !type.startsWith('image/') || !result.file?.base64) {
+    return undefined
+  }
+  if (type === 'image/png' && decodedBytes(result.file.base64) <= MAX_PNG_BYTES) {
     return undefined
   }
   return { base64: result.file.base64, dimensions: result.file.dimensions, type }

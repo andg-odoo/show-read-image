@@ -668,7 +668,8 @@ async function show($: EngineInterface, id: string, input: ShowInput): Promise<s
 
 // A Read that came back as JPEG or another type: converted to PNG and drawn as a card, since an Image takes PNG bytes
 async function readAsCard($: EngineInterface, id: string, path: string, image: PngFile) {
-  const png = await pngOfBlock($, image.base64, id)
+  // The file itself converts best; Read's copy is the fallback when the file is gone or unreadable
+  const png = (await pngOfFile($, path)) ?? (await pngOfBlock($, image.base64, id))
   if (!png) {
     return
   }
@@ -810,6 +811,9 @@ export const register: Register = on => {
     }
     const other = ran.deny === undefined && !ran.isError ? otherImageOf('Read', ran.result) : undefined
     if (other && e.file_path) {
+      const note = `${e.file_path}: Read returned ${other.type}, ${other.base64.length} base64 chars`
+      $.ui.log(`show-read-image: ${note}`, { to: 'debug' })
+      void homeOf($).then(home => $.fs.write(`${home}/.cache/show-read-image/last-read.txt`, `${note}\n`)).catch(() => undefined)
       void readAsCard($, e.tool_use_id, e.file_path, other).catch(() => undefined)
     }
     return ran

@@ -575,3 +575,54 @@ test('a Read that came back as JPEG still draws, at the file\'s own size', async
   expect(await row.find({ type: 'Text', text: /not read by the agent/ })).toBeUndefined()
   await row.unmount()
 })
+
+test('a Read whose PNG is over 2 MiB is converted from the file on disk', async ($, on) => {
+  const written = new Map<string, string>()
+  const huge = `iVBORw0KGgo${'A'.repeat(3_000_000)}`
+  mock.clock(on, { now: Date.UTC(2026, 10, 17, 12) })
+  mock.store(on)
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.write', (_, e) => {
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  const converted: string[] = []
+  on('process.run', (_, e) => {
+    if (e.argv[0] === 'sips') {
+      converted.push(e.argv[e.argv.length - 3]!)
+    }
+    return {
+      value: { exitCode: 0, stdout: e.argv.join(' ').includes('command -v sips') ? '/usr/bin/sips' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+    }
+  })
+  on('fs.stat', (_, e) => {
+    if (e.path === '/s/huge.png') {
+      return { value: { kind: 'file' as const, size: 20_000_000, mtimeMs: 1, isLink: false } }
+    }
+    if (e.path.includes('/converted/') && converted.length > 0) {
+      return { value: { kind: 'file' as const, size: 90, mtimeMs: 2, isLink: false } }
+    }
+    throw new Error('ENOENT')
+  })
+  on('fs.read', (_, e) => (e.path.includes('/converted/') ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
+  on('tool.call', () => ({ result: { type: 'image', file: { base64: huge, type: 'image/png', dimensions: { originalWidth: 1206, originalHeight: 2622 } } } }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine row</Text>
+  })
+  await $.tool.call({ tool: 'Read', file_path: '/s/huge.png', tool_use_id: 'huge' })
+  await new Promise<void>(done => setTimeout(done, 30))
+  expect(converted).toEqual(['/s/huge.png'])
+  expect([...written.entries()].find(([path]) => path.endsWith('last-read.txt'))?.[1]).toContain('image/png')
+  const row = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'huge',
+    viewport: { columns: 120, rows: 40 },
+    props: { tool_use_id: 'huge', tool: 'Read', input: { file_path: '/s/huge.png' }, isRunning: false, isErrored: false, isInterrupted: false, output: { type: 'image', file: { base64: huge, type: 'image/png' } } },
+  })
+  expect((await row.findAll({ type: 'Image' })).map(found => (found.props.source as { png?: string }).png)).toEqual([RED])
+  expect(await row.find({ type: 'Text', text: /1206×2622/ })).toBeDefined()
+  await row.unmount()
+})
