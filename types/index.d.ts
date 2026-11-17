@@ -8,7 +8,8 @@ export type ShowReadImageView = 'now' | 'side'
 
 export type ShowReadImageCardShot = { key: string; label: string; hash: string; isUnread: boolean }
 
-export type ShowReadImageCard = { title?: string; shots: ShowReadImageCardShot[] }
+// `isCommand`: made by a tool or command rather than shown on purpose; it folds away once a later Read shows it
+export type ShowReadImageCard = { title?: string; shots: ShowReadImageCardShot[]; at?: number; isCommand?: boolean }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -18,6 +19,7 @@ declare module 'claude-code' {
       mode: StateFamily<ShowReadImageMode>
       view: StateFamily<ShowReadImageView>
       pick: StateFamily<number>
+      seen: Shaped<Record<string, number>>
       cards: Shaped<Record<string, ShowReadImageCard>>
     }
   }

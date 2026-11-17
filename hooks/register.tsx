@@ -45,6 +45,9 @@ const mode = atom({ plugin: 'show-read-image', key: 'mode' } as const, 'both' as
 const view = atom({ plugin: 'show-read-image', key: 'view' } as const, 'now' as ShowReadImageView)
 // A compare card's choice: -1 all; with two pictures, which one alone; with more, which one beside the first
 const pick = atom({ plugin: 'show-read-image', key: 'pick' } as const, -1)
+// When each `path#hash` was last shown by a Read, so a command's card for the same picture can fold away
+const seen = atom({ plugin: 'show-read-image', key: 'seen' } as const, {} as Record<string, number>, { shape: 'seen-1' })
+const MAX_SEEN = 500
 const cards = atom({ plugin: 'show-read-image', key: 'cards' } as const, {} as Record<string, ShowReadImageCard>, { shape: 'cards-1' })
 
 const MIN_FRAME = 30
@@ -578,8 +581,18 @@ async function collect(
     }
   }
   if (shots.length > 0) {
-    await keepCard($, id, { shots })
+    await keepCard($, id, { shots, at: startedAt, isCommand: true })
   }
+}
+
+async function markSeen($: EngineInterface, path: string, hash: string) {
+  const now = await $.clock.now()
+  const all = await update($, seen, before => {
+    const keys = Object.keys(before)
+    const kept = keys.length >= MAX_SEEN ? Object.fromEntries(keys.slice(-MAX_SEEN / 2).map(k => [k, before[k]!])) : before
+    return { ...kept, [`${path}#${hash}`]: now }
+  })
+  await $.store.set('seen', all)
 }
 
 async function keepCard($: EngineInterface, id: string, card: ShowReadImageCard) {
@@ -632,6 +645,14 @@ async function bytesOf($: EngineInterface, shot: ShowReadImageCardShot) {
 
 // One picture draws as a read does, with its versions; several share a frame
 async function drawCard($: EngineInterface, ui: Ui, id: string, card: ShowReadImageCard, columns: number | undefined) {
+  if (card.isCommand) {
+    const shown = await read($, seen)
+    const later = (shot: ShowReadImageCardShot) => (shown[`${shot.key}#${shot.hash}`] ?? -Infinity) >= (card.at ?? Infinity)
+    if (card.shots.length > 0 && card.shots.every(later)) {
+      const names = card.shots.map(one => splitPath(one.key).name).join(', ')
+      return <ui.Text dimColor>{`  ${names} · shown by a Read below`}</ui.Text>
+    }
+  }
   const pictures: { shot: ShowReadImageCardShot; base64: string }[] = []
   for (const shot of card.shots) {
     const base64 = await bytesOf($, shot)
@@ -693,6 +714,10 @@ export const register: Register = on => {
     if (stored && typeof stored === 'object') {
       await update($, history, all => (Object.keys(all).length > 0 ? all : (stored as Record<string, ShowReadImageHistory>)))
     }
+    const storedSeen = await $.store.get('seen')
+    if (storedSeen && typeof storedSeen === 'object') {
+      await update($, seen, all => (Object.keys(all).length > 0 ? all : (storedSeen as Record<string, number>)))
+    }
     const storedCards = await $.store.get('cards')
     if (storedCards && typeof storedCards === 'object') {
       await update($, cards, all => (Object.keys(all).length > 0 ? all : (storedCards as Record<string, ShowReadImageCard>)))
@@ -738,6 +763,7 @@ export const register: Register = on => {
     if (file && e.file_path) {
       paths.set(e.tool_use_id, e.file_path)
       await record($, e.file_path, file.base64).catch(() => undefined)
+      await markSeen($, e.file_path, hashOf(file.base64)).catch(() => undefined)
     }
     return ran
   }).catch(($, e, next) => (next.called ? { deny: 'show-read-image: the tool call failed under its hook.' } : next(e)))

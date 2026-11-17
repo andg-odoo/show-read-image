@@ -21,9 +21,10 @@ A Claude Code mod that draws images inline in the transcript, under the tool cal
 - **Aspect warning.** Shots whose aspect ratios differ by more than 10% get a warning, since they are not comparable.
 - **One way to compare.** A card with several images has `[ side by side ] [ A only ] [ B only ]` for two, and
   `[ all ] [ vs B ] [ vs C ] …` for more, each beside the first.
-- **True size.** Pictures are sized from the terminal's measured cell shape (2:1 where it reports no pixel size),
-  never drawn larger than their own pixels (with a 16-column floor so tiny ones stay visible), and kept within 60%
-  of the visible rows.
+- **Size.** Pictures are sized from the terminal's measured cells. Small ones draw up to twice their pixels (2× under
+  400 px, tapering to 1× at 800), larger ones at their own size, never narrower than 16 columns, and within 60% of
+  the visible rows.
+- **No duplicates.** A card a command made folds to one dim line once a later Read shows the same picture.
 
 JPEGs, and PNGs over the 2 MiB an image may take, are converted and scaled down with whichever of `sips`, `magick`,
 `convert` or `ffmpeg` the machine has. Without one of them, those images get no card.

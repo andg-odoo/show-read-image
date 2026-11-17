@@ -118,9 +118,11 @@ export function cellOf(winsize: string): number | undefined {
   return size && size.height / size.width
 }
 
-// The widest a picture draws without being enlarged past its own pixels, but never smaller than `floor`
+// The widest a picture draws: small ones up to twice their pixels (2× under 400 px, tapering to 1× at 800),
+// larger ones at their own size, and never narrower than `floor`
 export function nativeColumns(width: number, cellWidth: number, floor = 16) {
-  return Math.max(floor, Math.ceil(width / cellWidth))
+  const allowed = Math.max(width, Math.min(2 * width, 800))
+  return Math.max(floor, Math.ceil(allowed / cellWidth))
 }
 
 export function fit(size: { width: number; height: number }, columns: number, maxRows: number, cell = DEFAULT_CELL, maxColumns = Infinity) {

@@ -65,15 +65,17 @@ test('the cell shape comes from the tty and falls back to 2:1', () => {
   expect(pack([1, 1], 100, 100, 6, Infinity, 2, 2.5)[0]![0]).toEqual({ index: 0, columns: 48, rows: 19 })
 })
 
-test('pictures never draw larger than their own pixels, but keep a readable floor', () => {
-  expect(nativeColumns(240, 10)).toBe(24)
-  expect(nativeColumns(64, 10)).toBe(16)
-  expect(fit({ width: 240, height: 160 }, 100, 30, 2, nativeColumns(240, 10))).toEqual({ columns: 24, rows: 8 })
-  // A 400×100 before and a 200×200 after share the shorter one's own height instead of enlarging it
+test('small pictures draw up to twice their pixels, large ones at their own size', () => {
+  expect(nativeColumns(240, 10)).toBe(48)
+  expect(nativeColumns(600, 10)).toBe(80)
+  expect(nativeColumns(1000, 10)).toBe(100)
+  expect(nativeColumns(40, 10)).toBe(16)
+  expect(fit({ width: 240, height: 160 }, 100, 30, 2, nativeColumns(240, 10))).toEqual({ columns: 48, rows: 16 })
+  // A 400×100 before and a 200×200 after share the shorter one's allowed height instead of enlarging it further
   const [row] = pack([4, 1], 200, 30, 1, 2, 2, 2, [nativeColumns(400, 10), nativeColumns(200, 10)])
   expect(row).toEqual([
-    { index: 0, columns: 40, rows: 5 },
-    { index: 1, columns: 10, rows: 5 },
+    { index: 0, columns: 80, rows: 10 },
+    { index: 1, columns: 20, rows: 10 },
   ])
 })
 
@@ -247,6 +249,9 @@ test('a screenshot a Bash command wrote draws under its row, marked as not read'
   })
   on('fs.read', (_, e) => (e.path === '/tmp/s.png' ? { value: { base64: RED } } : { value: written.get(e.path) ?? '' }))
   on('tool.call', (_, e) => {
+    if (e.tool === 'Read') {
+      return { result: { type: 'image', file: { base64: RED, type: 'image/png', originalSize: 90 } } }
+    }
     const command = String((e as unknown as { command?: string }).command ?? '')
     return { result: 'ok', text: command.includes('screenshot') ? 'Wrote screenshot to: /tmp/s.png' : '' }
   })
@@ -272,6 +277,20 @@ test('a screenshot a Bash command wrote draws under its row, marked as not read'
   expect(image).toBeDefined()
   expect((await ui.find({ type: 'Text', text: /not read by the agent/ }))?.text).toContain('8×4')
   await ui.unmount()
+
+  // Once a Read shows the same picture, the command's card folds to one line
+  await $.tool.call({ tool: 'Read', file_path: '/tmp/s.png', tool_use_id: 'read-s' })
+  const folded = await $.ui.mount({
+    plugin: 'show-read-image',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'bash-1',
+    viewport: { columns: 120, rows: 40 },
+    props: { tool_use_id: 'bash-1', tool: 'Bash', input: { command: 'x' }, isRunning: false, isErrored: false, isInterrupted: false, output: 'ok' },
+  })
+  expect(await folded.findAll({ type: 'Image' })).toHaveLength(0)
+  expect(await folded.find({ type: 'Text', text: /s\.png · shown by a Read below/ })).toBeDefined()
+  await folded.unmount()
 
   await $.tool.call({ tool: 'Bash', command: 'sips -Z 64 /tmp/old.png', tool_use_id: 'bash-2' })
   await new Promise<void>(done => setTimeout(done, 30))
