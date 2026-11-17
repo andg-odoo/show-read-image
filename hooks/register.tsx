@@ -281,7 +281,7 @@ function Choice(ui: Ui, key: string, label: string, isActive: boolean, onPress: 
 
 // The footer's actions for one picture: Expand and View at full strength, then Save to Downloads and Copy path
 // where it has a file
-function pictureActions($: EngineInterface, ui: Ui, id: string, label: string, base64: string, path?: string, size?: Size, video?: string) {
+function pictureActions($: EngineInterface, ui: Ui, id: string, label: string, base64: string, path?: string, size?: Size, video?: string, duration?: number) {
   const file = video ?? path
   const fileActions = file
     ? [
@@ -293,7 +293,7 @@ function pictureActions($: EngineInterface, ui: Ui, id: string, label: string, b
         }),
       ]
     : []
-  const elements = [ExpandLink($, ui, id, label, base64, path, size, video, '⤢ Expand', false), ...fileActions]
+  const elements = [ExpandLink($, ui, id, label, base64, path, size, video, '⤢ Expand', false, duration), ...fileActions]
   const labels = ['⤢ Expand', ...(file ? ['↗ View', 'Save to Downloads', 'Copy path'] : [])]
   return { elements, width: labelsWidth(labels) }
 }
@@ -314,9 +314,9 @@ async function saveToDownloads($: EngineInterface, file: string) {
 }
 
 // Opens the Expand pane on this picture; `key` lets it step through the picture's versions
-function ExpandLink($: EngineInterface, ui: Ui, id: string, label: string, base64: string, key?: string, size?: Size, video?: string, text = '⤢ Expand', isDim = true) {
+function ExpandLink($: EngineInterface, ui: Ui, id: string, label: string, base64: string, key?: string, size?: Size, video?: string, text = '⤢ Expand', isDim = true, duration?: number) {
   const hash = hashOf(base64)
-  const own = { ...(size ? { width: size.width, height: size.height } : {}), ...(video ? { video } : {}) }
+  const own = { ...(size ? { width: size.width, height: size.height } : {}), ...(video ? { video } : {}), ...(duration ? { duration } : {}) }
   const open = async () => {
     remember(expandedBytes, hash, base64)
     await update($, expanded, () => (key ? { label, hash, key, ...own } : { label, hash, ...own }))
@@ -1028,7 +1028,7 @@ async function drawVideo($: EngineInterface, ui: Ui, requestId: string, video: V
   const samples = !p && video.samples ? [<Text key={`${requestId}-samples`} dimColor>{video.samples}</Text>] : []
   const body = (
     <Box key={`${requestId}-video`} flexDirection="row" gap={3}>
-      <Box flexDirection="column">
+      <Box flexDirection="column" width={Math.max(cells.columns, !p && video.samples ? video.samples.length : 0)}>
         {shown}
         {bar}
         {samples}
@@ -1036,13 +1036,14 @@ async function drawVideo($: EngineInterface, ui: Ui, requestId: string, video: V
       {chapters.length > 0 ? Chapters(ui, site, chapters, start) : null}
     </Box>
   )
-  const actions = pictureActions($, ui, requestId, stem, file.base64, video.path, size, video.path)
+  const actions = pictureActions($, ui, requestId, stem, file.base64, video.path, size, video.path, video.duration)
   // At rest the card offers to play; once played, Frames goes back to the grid
   const left = p
     ? [Choice(ui, `${site}-video`, 'Video', true, () => undefined), Link(ui, `${site}-frames`, 'Frames', () => stopPlayback($))]
     : [<ui.Button key={`${site}-play`} plain label="▶ Play" onPress={() => void start(0)} />]
   const footer = { left, right: actions.elements, width: labelsWidth(p ? ['Video', 'Frames'] : ['▶ Play']) + 3 + actions.width }
-  const frameAt: FrameAt = { title: video.title ?? stem, hint, meta: video.note, width: cells.columns + side, max: box.columns, isUnread, footer }
+  const mediaWidth = Math.max(cells.columns, !p && video.samples ? video.samples.length : 0)
+  const frameAt: FrameAt = { title: video.title ?? stem, hint, meta: video.note, width: mediaWidth + side, max: box.columns, isUnread, footer }
   return Frame(ui, frameAt, body)
 }
 
@@ -1060,15 +1061,20 @@ async function notePaneSize($: EngineInterface, columns: number, rows: number) {
 let wantedBox: { width: number; height: number } | undefined
 
 // The Expand pane for a video: its filmstrip with [ play ], then live frames with pause, restart and the frame rate
-async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: number, video: string, label: string, strip: string) {
+async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: number, video: string, label: string, strip: string, duration: number) {
   const { Box, Button, Image, Text } = ui
   const playing = currentPlayback()
   const p = playing?.video === video && playing.site === PANE ? playing : undefined
-  if (playing && !p) {
-    stopPlayback($)
-  }
-  const box = playerBox(columns, rows, cellWidth, cell, 3)
+  const box = playerBox(columns, rows, cellWidth, cell, 4)
   const start = (from: number, size = box) => startVideo($, PANE, video, from, size)
+  if (playing && !p) {
+    // Expanded while its card was playing: the pane carries on from the same moment
+    const handoff = playing.video === video && (playing.status === 'playing' || playing.status === 'starting') ? playing.position : undefined
+    stopPlayback($)
+    if (handoff !== undefined) {
+      void start(handoff)
+    }
+  }
   // A resized pane decodes at its new size, from where it was, once the size has held for a moment: dragging the
   // pane's edge redraws many times, and restarting on each would decode a burst of short runs
   if (p?.status === 'playing' && p.box && (Math.abs(p.box.width - box.width) > 40 || Math.abs(p.box.height - box.height) > 40)) {
@@ -1083,24 +1089,27 @@ async function drawPlayer($: EngineInterface, ui: Ui, columns: number, rows: num
   }
   const frame = p?.first ?? p?.last
   const picture = frame ?? strip
-  const cells = fit(pngSize(picture) ?? UNKNOWN, columns, Math.max(4, rows - 3), cell)
+  const cells = fit(pngSize(picture) ?? UNKNOWN, columns, Math.max(4, rows - 4), cell)
   const status = !p
-    ? 'filmstrip'
+    ? 'frames'
     : p.status === 'failed'
       ? `failed: ${p.error || 'the decoder stopped'}`
-      : `${p.position.toFixed(1)} s · ${p.shownLastSecond} fps · ${p.dropped} dropped${p.status === 'ended' ? ' · ended' : p.status === 'paused' ? ' · paused' : ''}`
+      : `${p.shownLastSecond} fps · ${p.dropped} dropped`
   const isRunning = p?.status === 'playing' || p?.status === 'starting'
+  // Without a known length there's no bar to draw, only the play word
   const toggle = isRunning
-    ? <Button key="player-pause" plain label="▮▮ Pause" onPress={() => pausePlayback($)} />
+    ? <Button key="player-pause" plain label="❚❚ Pause" onPress={() => pausePlayback($)} />
     : <Button key="player-play" plain label="▶ Play" onPress={() => void start(p && p.status === 'paused' ? p.position : 0)} />
+  const bar = duration > 0 ? ScrubBar(ui, $, 'player', p, duration, Math.max(30, cells.columns), start) : toggle
   return (
     <Box flexDirection="column">
       {frame
         ? <Image key={playerKey(cells.columns, cells.rows)} source={{ png: frame }} columns={cells.columns} rows={cells.rows} alt={`[video: ${label}]`} />
         : <Image key={`player-strip-${cells.columns}x${cells.rows}`} source={{ png: strip }} columns={cells.columns} rows={cells.rows} alt={`[video: ${label}]`} />}
+      {bar}
       {Bar(
         ui,
-        [toggle, <Text key="player-label" bold>{label}</Text>, <Text key="player-status" dimColor>{status}</Text>],
+        [<Text key="player-label" bold>{label}</Text>, <Text key="player-status" dimColor>{status}</Text>],
         [Link(ui, 'player-restart', '↺ Restart', () => start(0)), Link(ui, 'pane-close', 'Close', () => $.ui.close({ id: PANE }))],
       )}
     </Box>
@@ -1224,7 +1233,7 @@ export const register: Register = on => {
     }
     void notePaneSize($, e.props.bodyColumns, e.props.scroll.bodyRows)
     if (shown.video) {
-      return drawPlayer($, ui, e.props.bodyColumns, e.props.scroll.bodyRows, shown.video, shown.label, base64)
+      return drawPlayer($, ui, e.props.bodyColumns, e.props.scroll.bodyRows, shown.video, shown.label, base64, shown.duration ?? 0)
     }
     const size = pngSize(base64) ?? UNKNOWN
     const cells = fit(size, e.props.bodyColumns, Math.max(4, e.props.scroll.bodyRows - 2), cell)

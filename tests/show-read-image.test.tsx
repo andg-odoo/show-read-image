@@ -809,6 +809,7 @@ test('frame lines and the decode box', () => {
   expect(parseFrameLine('FRAME x')).toBeUndefined()
   // 80×30 cells of 10×21 px, less three rows for the controls
   expect(playerBox(80, 30, 10, 2.1, 3)).toEqual({ width: 800, height: 567 })
+  expect(playerBox(80, 30, 10, 2.1, 4)).toEqual({ width: 800, height: 546 })
 })
 
 test('a video expands to its filmstrip with play, and play starts ffmpeg in real time at the pane size', async ($, on) => {
@@ -874,13 +875,16 @@ test('a video expands to its filmstrip with play, and play starts ffmpeg in real
     viewport: { columns: 160, rows: 50 },
     props: { title: 'clip', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
   })
-  expect(await pane.find({ type: 'Text', text: 'filmstrip' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: 'frames' })).toBeDefined()
+  // The pane has the card's scrub bar, from the video's length
+  expect(await pane.find({ type: 'Button', key: 'player-seek-0' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: ' 0:05' })).toBeDefined()
   await pane.press({ key: 'player-play' })
   await new Promise<void>(done => setTimeout(done, 30))
   const [ffmpeg] = spawned
   expect(ffmpeg?.[0]).toBe('ffmpeg')
   expect(ffmpeg).toContain('-re')
-  expect(ffmpeg?.join(' ')).toContain('fps=20,scale=w=800:h=567:force_original_aspect_ratio=decrease')
+  expect(ffmpeg?.join(' ')).toContain('fps=20,scale=w=800:h=546:force_original_aspect_ratio=decrease')
   expect(ffmpeg?.at(-1)).toMatch(/\/converted\/play-[a-z0-9]+\/f%06d\.png$/)
   await pane.unmount()
 
