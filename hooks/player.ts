@@ -181,23 +181,33 @@ export function play($: EngineInterface, paneId: string, video: string, from: nu
     }
   })()
   if (source.kind === 'files') {
-    let next = 0
+    let isTaking = false
     run.poll = $.clock.every(Math.round(1000 / source.fps / 2), () => {
-      void (async () => {
-        next = await takeFrames($, p, paneId, source, from, next, isCurrent)
-      })()
+      if (isTaking) {
+        return
+      }
+      isTaking = true
+      void takeFrames($, p, paneId, source, from, isCurrent).finally(() => {
+        isTaking = false
+      })
     })
   }
 }
 
-// ffmpeg writes frame N while N+1 doesn't exist yet; a frame is complete once the next one has started
-async function takeFrames($: EngineInterface, p: Playback, paneId: string, source: Extract<Source, { kind: 'files' }>, from: number, next: number, isCurrent: () => boolean) {
-  let at = next
-  while (isCurrent() && (await $.fs.exists(frameFile(source.dir, at + 1)))) {
-    await showFile($, p, paneId, source, from, at)
-    at += 1
+// ffmpeg writes frame N while N+1 doesn't exist yet, so all but the newest file are complete
+async function takeFrames($: EngineInterface, p: Playback, paneId: string, source: Extract<Source, { kind: 'files' }>, from: number, isCurrent: () => boolean) {
+  const files = (await $.fs.list(source.dir).catch(() => [])).map(entry => entry.name).filter(name => name.endsWith('.png')).sort()
+  const ready = files.slice(0, -1)
+  const newest = ready.at(-1)
+  if (!newest || !isCurrent()) {
+    return
   }
-  return at
+  const stale = ready.slice(0, -1)
+  if (stale.length) {
+    p.dropped += stale.length
+    await $.process.run(['rm', '-f', ...stale.map(name => `${source.dir}/${name}`)]).catch(() => undefined)
+  }
+  await showFile($, p, paneId, source, from, Number(newest.replace(/\D/g, '')))
 }
 
 async function drainFiles($: EngineInterface, p: Playback, paneId: string, source: Extract<Source, { kind: 'files' }>, from: number, isEnd: boolean) {
